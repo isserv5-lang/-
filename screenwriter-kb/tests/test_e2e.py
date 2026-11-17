@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -28,6 +29,7 @@ from swkb.jinghua_lock import (
 from swkb.originality import check_script_originality
 from swkb.repository import (
     get_dashboard_stats,
+    get_graph_universe,
     get_work_detail,
     list_characters,
     list_dialogue_snippets,
@@ -39,6 +41,7 @@ from swkb.repository import (
     upsert_character,
     upsert_genre,
 )
+from swkb.taxonomy import CHANNELS, OFFICIAL_TAGS
 from swkb.web_api import app
 
 SAMPLE_TXT = Path(r"D:\1\软件\小说\云糯糯.txt")
@@ -58,28 +61,158 @@ def isolated_kb(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return db_path
 
 
-def test_1_drawers_create_and_list(isolated_kb: Path) -> None:
-    """测试 1：全类型抽屉预置、新建与读取。"""
+def test_1_drawers_create_and_list(isolated_kb: Path, tmp_path: Path) -> None:
+    """测试 1：三大主频与 45 个平台真实标签预置、新建与 v1->v2 平滑升级。"""
     genres = list_genres()
     genre_ids = {g["id"] for g in genres}
-    assert {"mengwa", "shoushi", "dushi", "chongsheng", "xuanyi", "guyan", "hudong"} <= genre_ids
+    expected_ids = {t["id"] for t in OFFICIAL_TAGS}
+    assert expected_ids <= genre_ids
+    assert len(genres) == len(OFFICIAL_TAGS) == 45
+    assert {"mengwa", "shoushi", "chongsheng", "xuanyi", "hudong", "gongdou", "dushi_naodong"} <= genre_ids
+
+    by_channel = {ch["name"]: [g for g in genres if g["channel"] == ch["name"]] for ch in CHANNELS}
+    assert len(by_channel["女频"]) == 16
+    assert len(by_channel["男频"]) == 15
+    assert len(by_channel["通用"]) == 14
+    assert any("红果" in g["platforms"] and "番茄" in g["platforms"] for g in genres)
+    assert any("QQ阅读" in g["platforms"] for g in genres)
+
+    universe = get_graph_universe()
+    assert universe["root"]["total_tags"] == 45
+    assert [c["name"] for c in universe["channels"]] == ["女频", "男频", "通用"]
+    assert [c["tags_count"] for c in universe["channels"]] == [16, 15, 14]
 
     created = upsert_genre(
         genre_id="miniguo",
         name="民国谍战",
         description="双面身份潜伏、暗语试探与高压审讯交锋",
         channel_hint="男频/女频谍战短剧",
+        channel="男频",
+        sub_group="题材主干",
+        platforms="红果/番茄",
     )
     assert created["id"] == "miniguo"
     assert created["name"] == "民国谍战"
+    assert created["channel"] == "男频"
+    assert created["platforms"] == "红果/番茄"
 
     updated_genres = list_genres()
-    assert any(g["id"] == "miniguo" and g["channel_hint"] == "男频/女频谍战短剧" for g in updated_genres)
+    assert any(
+        g["id"] == "miniguo"
+        and g["channel_hint"] == "男频/女频谍战短剧"
+        and g["channel"] == "男频"
+        for g in updated_genres
+    )
 
     stats = get_dashboard_stats()
-    assert stats["total_genres"] == 8
+    assert stats["total_genres"] == 46
     assert stats["total_works"] == 0
-    assert stats["total_jinghua_rules"] >= 20
+    assert stats["total_jinghua_rules"] >= 26
+
+    # Verify smooth ALTER TABLE + legacy genre migration from a v1 database
+    v1_db = tmp_path / "legacy_v1.sqlite"
+    raw_conn = sqlite3.connect(str(v1_db))
+    raw_conn.executescript(
+        """
+        CREATE TABLE kb_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        CREATE TABLE genres (
+            id TEXT PRIMARY KEY,
+            name TEXT UNIQUE NOT NULL,
+            description TEXT DEFAULT '',
+            channel_hint TEXT DEFAULT '',
+            created_at TEXT
+        );
+        CREATE TABLE works (
+            id TEXT PRIMARY KEY,
+            title TEXT NOT NULL,
+            author TEXT DEFAULT '',
+            genre_id TEXT,
+            source_path TEXT,
+            norm_path TEXT,
+            file_sha256 TEXT,
+            total_chars INTEGER DEFAULT 0,
+            total_chapters INTEGER DEFAULT 0,
+            clean_chapters INTEGER DEFAULT 0,
+            corrupted_chapters INTEGER DEFAULT 0,
+            completion_status TEXT DEFAULT 'unknown',
+            summary_one_page TEXT DEFAULT '',
+            style_notes TEXT DEFAULT '',
+            created_at TEXT
+        );
+        CREATE TABLE dialogue_snippets (
+            id TEXT PRIMARY KEY,
+            work_id TEXT,
+            genre_id TEXT NOT NULL,
+            chapter_num INTEGER,
+            line_start INTEGER,
+            line_end INTEGER,
+            scene_tag TEXT DEFAULT '',
+            raw_text TEXT NOT NULL,
+            why_funny_or_effective TEXT DEFAULT '',
+            trigger_context TEXT DEFAULT '',
+            status TEXT DEFAULT 'pending',
+            rating INTEGER DEFAULT 0,
+            seg_tokens TEXT DEFAULT '',
+            created_at TEXT
+        );
+        CREATE TABLE characters (
+            id TEXT PRIMARY KEY,
+            work_id TEXT,
+            genre_id TEXT,
+            name TEXT NOT NULL,
+            role_type TEXT DEFAULT '',
+            traits TEXT NOT NULL,
+            speech_style TEXT DEFAULT '',
+            catchphrases TEXT DEFAULT '',
+            forbidden_words TEXT DEFAULT '',
+            sample_lines_json TEXT DEFAULT '[]',
+            created_at TEXT
+        );
+        CREATE TABLE scene_highlights (
+            id TEXT PRIMARY KEY,
+            work_id TEXT,
+            genre_id TEXT NOT NULL,
+            chapter_range TEXT,
+            line_start INTEGER,
+            line_end INTEGER,
+            hook_type TEXT DEFAULT '',
+            plain_summary TEXT NOT NULL,
+            why_it_hooks TEXT DEFAULT '',
+            raw_excerpt TEXT DEFAULT '',
+            created_at TEXT
+        );
+        CREATE TABLE script_projects (
+            id TEXT PRIMARY KEY,
+            title TEXT NOT NULL,
+            genre_id TEXT DEFAULT 'hudong',
+            project_mode TEXT DEFAULT 'branching',
+            synopsis TEXT DEFAULT '',
+            state_vars_json TEXT DEFAULT '{}',
+            target_style_notes TEXT DEFAULT '',
+            created_at TEXT,
+            updated_at TEXT
+        );
+        INSERT INTO genres (id, name, description, channel_hint, created_at)
+        VALUES ('dushi', '都市爽文', '旧抽屉', '', '2026-01-01T00:00:00Z'),
+               ('guyan', '古言权谋', '旧古言', '', '2026-01-01T00:00:00Z');
+        INSERT INTO works (id, title, genre_id, created_at)
+        VALUES ('w_legacy', '旧都市测试', 'dushi', '2026-01-01T00:00:00Z');
+        INSERT INTO kb_meta (key, value) VALUES ('initial_seed_v1', '2026-01-01T00:00:00Z');
+        """
+    )
+    raw_conn.commit()
+    raw_conn.close()
+
+    migrated = get_conn(v1_db)
+    try:
+        cols = {r["name"] for r in migrated.execute("PRAGMA table_info(genres)").fetchall()}
+        assert {"channel", "sub_group", "platforms", "sort_order"} <= cols
+        assert migrated.execute("SELECT COUNT(*) FROM genres").fetchone()[0] == 45
+        assert migrated.execute("SELECT id FROM genres WHERE id IN ('dushi', 'guyan')").fetchall() == []
+        w_row = migrated.execute("SELECT genre_id FROM works WHERE id = 'w_legacy'").fetchone()
+        assert w_row["genre_id"] == "dushi_naodong"
+    finally:
+        migrated.close()
 
 
 @pytest.mark.skipif(
@@ -365,18 +498,71 @@ def test_6_interactive_branching_diagnostics_and_export(isolated_kb: Path) -> No
 
 
 def test_7_web_api_and_mcp_tools(isolated_kb: Path, tmp_path: Path) -> None:
-    """测试 7：FastAPI TestClient 全核心接口返回 200 与静态首页可访问，且 MCP 12 个工具函数全部正常调用。"""
+    """测试 7：FastAPI TestClient 全核心接口（含图谱聚合与拖拽上传）返回 200 与静态首页可访问，且 MCP 12 个工具函数全部正常调用。"""
     # Part A: FastAPI TestClient
     with TestClient(app) as client:
         assert client.get("/").status_code == 200
         assert client.get("/static/index.html").status_code == 200
+        assert client.get("/static/styles.css").status_code == 200
+        assert client.get("/static/app.js").status_code == 200
         assert client.get("/api/health").status_code == 200
         assert client.get("/api/dashboard").status_code == 200
         assert client.get("/api/genres").status_code == 200
+
+        universe_resp = client.get("/api/graph/universe")
+        assert universe_resp.status_code == 200
+        u_data = universe_resp.json()
+        assert u_data["root"]["id"] == "root"
+        assert u_data["root"]["total_tags"] == 45
+        assert [c["id"] for c in u_data["channels"]] == ["female", "male", "common"]
+        assert len(u_data["tags"]) == 45
+
         assert client.post(
             "/api/genres",
-            json={"genre_id": "xuanhuan", "name": "东方玄幻", "channel_hint": "男频长篇"},
+            json={
+                "genre_id": "xuanhuan",
+                "name": "东方玄幻",
+                "channel": "男频",
+                "sub_group": "题材主干",
+                "platforms": "番茄/QQ阅读",
+                "channel_hint": "男频长篇",
+            },
         ).status_code == 200
+
+        # Drag-and-drop multipart upload endpoint (/api/upload-novel)
+        upload_bytes = (
+            "第1章 萌娃进宫\n"
+            "小团子抱着糖葫芦坐在门槛上。\n"
+            "“皇爷爷，你再皱眉，我就把你的奏折拿去折纸飞机啦！”\n"
+            "满殿大臣一时都不敢吭声。\n"
+        ).encode("utf-8")
+        up_resp = client.post(
+            "/api/upload-novel",
+            files={"file": ("drag_drop_mengwa.txt", upload_bytes, "text/plain")},
+            data={"genre_id": "mengwa", "author": "测试作者"},
+        )
+        assert up_resp.status_code == 200
+        up_json = up_resp.json()
+        assert up_json["ok"] is True
+        assert up_json["result"]["title"] == "drag_drop_mengwa"
+        assert up_json["result"]["genre_id"] == "mengwa"
+        assert Path(up_json["uploaded_path"]).exists()
+
+        bad_ext_resp = client.post(
+            "/api/upload-novel",
+            files={"file": ("bad.pdf", b"not a novel", "application/pdf")},
+            data={"genre_id": "mengwa"},
+        )
+        assert bad_ext_resp.status_code == 400
+
+        u_after = client.get("/api/graph/universe").json()
+        assert u_after["root"]["total_works"] == 1
+        female_ch = next(c for c in u_after["channels"] if c["id"] == "female")
+        assert female_ch["works_count"] == 1
+        mengwa_tag = next(t for t in u_after["tags"] if t["id"] == "mengwa")
+        assert mengwa_tag["works_count"] == 1
+        assert len(u_after["works"]) == 1
+        assert u_after["works"][0]["title"] == "drag_drop_mengwa"
 
         sn_resp = client.post(
             "/api/snippets",
@@ -460,15 +646,23 @@ def test_7_web_api_and_mcp_tools(isolated_kb: Path, tmp_path: Path) -> None:
     )
 
     ov = mcp_server.kb_overview_and_drawers()
-    assert len(ov["genres"]) >= 7
+    assert len(ov["genres"]) >= 45
+    assert [c["name"] for c in ov["channels"]] == ["女频", "男频", "通用"]
+    assert all("channel" in g and "sub_group" in g and "platforms" in g for g in ov["genres"])
 
     g_res = mcp_server.create_genre_drawer(
         genre_id="kuaichuan",
         name="快穿打脸",
         description="多世界切换打脸",
         channel_hint="女频快穿",
+        channel="女频",
+        sub_group="爆款设定梗",
+        platforms="番茄/红果",
     )
     assert g_res["ok"] is True
+    assert g_res["genre"]["channel"] == "女频"
+    assert g_res["genre"]["sub_group"] == "爆款设定梗"
+    assert g_res["genre"]["platforms"] == "番茄/红果"
 
     imp_res = mcp_server.import_novel(str(mcp_novel), genre_id="kuaichuan")
     assert imp_res["ok"] is True

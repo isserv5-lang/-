@@ -9,7 +9,8 @@ from pathlib import Path
 from typing import Any
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -37,6 +38,7 @@ from swkb.jinghua_lock import (
 from swkb.originality import check_script_originality
 from swkb.repository import (
     get_dashboard_stats,
+    get_graph_universe,
     get_work_detail,
     list_characters,
     list_dialogue_snippets,
@@ -96,6 +98,9 @@ class GenreCreateRequest(BaseModel):
     name: str
     description: str = ""
     channel_hint: str = ""
+    channel: str = "通用"
+    sub_group: str = "题材主干"
+    platforms: str = ""
 
 
 class NovelImportRequest(BaseModel):
@@ -266,6 +271,12 @@ def api_dashboard():
     }
 
 
+@app.get("/api/graph/universe")
+def api_graph_universe():
+    _ensure_db()
+    return get_graph_universe()
+
+
 # ---------------------------------------------------------------------------
 # Genres
 # ---------------------------------------------------------------------------
@@ -291,6 +302,9 @@ def api_create_genre(payload: GenreCreateRequest):
         name=name,
         description=payload.description.strip(),
         channel_hint=payload.channel_hint.strip(),
+        channel=payload.channel.strip() or "通用",
+        sub_group=payload.sub_group.strip() or "题材主干",
+        platforms=payload.platforms.strip(),
     )
     return {"item": item}
 
@@ -305,6 +319,63 @@ def api_list_works(genre_id: str | None = Query(default=None)):
     _ensure_db()
     gid = genre_id.strip() if genre_id else None
     return {"items": list_works(genre_id=gid or None)}
+
+
+@app.post("/api/upload-novel")
+async def api_upload_novel(
+    request: Request,
+    file: UploadFile = File(...),
+    genre_id: str | None = Form(default=None),
+    title: str | None = Form(default=None),
+    author: str = Form(default=""),
+):
+    _ensure_db()
+    raw_filename = Path(file.filename or "novel.txt").name
+    safe_name = re.sub(r'[\\/:*?"<>|]+', "_", raw_filename).strip() or "novel.txt"
+    ext = Path(safe_name).suffix.lower()
+    if ext not in {".txt", ".docx"}:
+        raise HTTPException(status_code=400, detail="仅支持上传 .txt 或 .docx 格式小说文件")
+
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="上传的小说文件为空")
+
+    uploads_dir = get_data_dir() / "sources" / "uploads"
+    uploads_dir.mkdir(parents=True, exist_ok=True)
+    dest_path = uploads_dir / safe_name
+    if dest_path.exists():
+        dest_path = uploads_dir / f"{uuid.uuid4().hex[:8]}_{safe_name}"
+    dest_path.write_bytes(content)
+
+    resolved_genre = (
+        (genre_id or request.query_params.get("genre_id") or "mengwa").strip()
+        or "mengwa"
+    )
+    orig_stem = Path(safe_name).stem.strip() or "未命名小说"
+    resolved_title = (
+        (title or request.query_params.get("title") or "").strip()
+        or orig_stem
+    )
+    resolved_author = (
+        (author or request.query_params.get("author") or "").strip()
+    )
+
+    try:
+        result = await run_in_threadpool(
+            import_novel_file,
+            file_path=dest_path,
+            genre_id=resolved_genre,
+            title=resolved_title,
+            author=resolved_author,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"上传导入失败：{exc}") from exc
+
+    return {
+        "ok": True,
+        "result": result,
+        "uploaded_path": str(dest_path),
+    }
 
 
 @app.post("/api/works/import")

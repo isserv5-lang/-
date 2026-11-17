@@ -29,6 +29,7 @@ from swkb.jinghua_lock import (
 from swkb.originality import check_script_originality
 from swkb.repository import (
     get_dashboard_stats,
+    get_graph_universe,
     list_characters,
     list_dialogue_snippets,
     list_genres,
@@ -96,18 +97,31 @@ def _normalize_review_status(raw_status: str) -> str:
 
 @mcp.tool()
 def kb_overview_and_drawers() -> dict[str, Any]:
-    """查看编剧本地知识库总览：所有类型抽屉、已入库书籍、好梗数量、精话锁规则数与互动影游项目列表。
+    """查看编剧本地知识库总览：三大频（女频/男频/通用）与全部精准标签抽屉、已入库书籍、好梗数量、精话锁规则数与互动影游项目列表。
 
     建议每次开始新对话、不确定有哪些类型抽屉或想查看库存时最先调用。
     """
     _ensure_db()
     stats = get_dashboard_stats()
+    universe = get_graph_universe()
     genres = list_genres()
     works = list_works()
     projects = list_script_projects()
     return {
         "data_dir": str(get_data_dir()),
         "stats": stats,
+        "channels": [
+            {
+                "id": ch.get("id"),
+                "name": ch.get("name"),
+                "description": ch.get("description"),
+                "tags_count": ch.get("tags_count"),
+                "works_count": ch.get("works_count"),
+                "approved_count": ch.get("approved_count"),
+                "pending_count": ch.get("pending_count"),
+            }
+            for ch in universe.get("channels", [])
+        ],
         "genres": genres,
         "works": [
             {
@@ -140,14 +154,20 @@ def create_genre_drawer(
     name: str,
     description: str = "",
     channel_hint: str = "",
+    channel: str = "通用",
+    sub_group: str = "题材主干",
+    platforms: str = "",
 ) -> dict[str, Any]:
-    """新建或更新一个类型抽屉（如都市、萌娃、兽世、重生、悬疑、古言、互动影游或自定义新题材）。
+    """新建或更新一个类型抽屉（支持归入女频 / 男频 / 通用三大主频及子分组）。
 
     参数说明：
     - genre_id: 英文短标识，如 "nvewen"、"kehuan"（全小写无空格）
     - name: 中文抽屉名称，如 "现代虐恋"
     - description: 这个抽屉主要存什么风格的梗与对白
-    - channel_hint: 目标渠道提示，如 "女频短剧"、"男频爽文"、"真人互动影游"
+    - channel_hint: 对白风味与创作提示，如 "台词短脆、少废话直接反杀"
+    - channel: 所属三大主频，取值 "女频" / "男频" / "通用"（默认 "通用"）
+    - sub_group: 二级分组，如 "题材主干" / "爆款设定梗" / "叙事机制"（默认 "题材主干"）
+    - platforms: 参考平台标签来源，如 "番茄/红果"（可选）
     """
     _ensure_db()
     gid = genre_id.strip().lower()
@@ -158,6 +178,9 @@ def create_genre_drawer(
         name=name.strip(),
         description=description.strip(),
         channel_hint=channel_hint.strip(),
+        channel=channel.strip() or "通用",
+        sub_group=sub_group.strip() or "题材主干",
+        platforms=platforms.strip(),
     )
     return {"ok": True, "genre": genre}
 

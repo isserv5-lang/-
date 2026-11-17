@@ -3,681 +3,207 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>编剧灵感保险箱 · 本地可视化工作台</title>
+  <title>编剧灵感星图 · Antigravity Story Graph</title>
   <link rel="stylesheet" href="/static/styles.css" />
 </head>
 <body>
-  <header class="topbar">
-    <div class="brand">
-      <div class="brand-mark">戏</div>
-      <div>
-        <h1 class="brand-title">编剧灵感保险箱</h1>
-        <p class="brand-sub">分门别类攒原话 · 精话锁去AI油腻 · 互动影游多支线画布</p>
+  <!-- 全屏沉浸式纯黑图谱画布 -->
+  <main id="canvas-stage" class="canvas-stage" aria-label="反重力动态交互图谱画布">
+    <div id="canvas-grid" class="canvas-grid"></div>
+
+    <!-- 主 SVG 画布（全屏自适应 + 平移缩放） -->
+    <svg id="graph-svg" class="graph-svg" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <!-- 标准箭头 -->
+        <marker id="arrow-muted" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M 1 1.5 L 8.5 5 L 1 8.5 z" fill="#434b5c" />
+        </marker>
+        <marker id="arrow-active" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+          <path d="M 1 1.5 L 8.5 5 L 1 8.5 z" fill="#8ab4f8" />
+        </marker>
+        <marker id="arrow-good" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+          <path d="M 1 1.5 L 8.5 5 L 1 8.5 z" fill="#fbbf24" />
+        </marker>
+        <marker id="arrow-bad" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+          <path d="M 1 1.5 L 8.5 5 L 1 8.5 z" fill="#f87171" />
+        </marker>
+
+        <!-- 柔光滤镜 -->
+        <filter id="glow-soft" x="-30%" y="-30%" width="160%" height="160%">
+          <feGaussianBlur stdDeviation="3.5" result="blur" />
+          <feMerge>
+            <feMergeNode in="blur" />
+            <feMergeNode in="SourceGraphic" />
+          </feMerge>
+        </filter>
+        <filter id="glow-drop" x="-40%" y="-40%" width="180%" height="180%">
+          <feGaussianBlur stdDeviation="6" result="blur" />
+          <feMerge>
+            <feMergeNode in="blur" />
+            <feMergeNode in="SourceGraphic" />
+          </feMerge>
+        </filter>
+      </defs>
+
+      <!-- 平移与缩放容器 -->
+      <g id="graph-viewport">
+        <g id="layer-groups"></g>
+        <g id="layer-edges"></g>
+        <g id="layer-particles"></g>
+        <g id="layer-nodes"></g>
+      </g>
+    </svg>
+
+    <!-- 拖拽文件全局高亮提示层 -->
+    <div id="drop-hint-banner" class="drop-hint-banner hidden">
+      拖放到任意标签胶囊上松手，即可自动解析喂书
+    </div>
+  </main>
+
+  <!-- 顶部悬浮半透明毛玻璃胶囊栏 (高 44px) -->
+  <header class="floating-topbar" role="banner">
+    <!-- 左侧双模式切换 -->
+    <div class="mode-switch" role="tablist" aria-label="图谱模式">
+      <button id="mode-universe" class="mode-pill active" type="button" data-mode="universe">
+        <span class="mode-dot dot-universe">◉</span> 知识星图
+      </button>
+      <button id="mode-branching" class="mode-pill" type="button" data-mode="branching">
+        <span class="mode-dot dot-branching">◎</span> 互动支线
+      </button>
+    </div>
+
+    <!-- 中间搜索与轻巧过滤 / 支线切换栏 -->
+    <div class="topbar-center">
+      <!-- 知识星图模式控制 -->
+      <div id="controls-universe" class="center-group">
+        <div class="search-pill">
+          <span class="search-icon" aria-hidden="true">⌕</span>
+          <input id="search-input" type="search" placeholder="搜标签 / 书名 / 台词梗..." autocomplete="off" />
+          <button id="search-clear" class="icon-clear hidden" type="button" title="清空">×</button>
+        </div>
+        <button id="filter-populated-btn" class="filter-toggle" type="button" title="切换显示全部标签或仅看已有素材的标签">
+          <span id="filter-populated-label">全部标签</span>
+        </button>
+      </div>
+
+      <!-- 互动支线模式控制 -->
+      <div id="controls-branching" class="center-group hidden">
+        <select id="branch-project-select" class="project-select" aria-label="选择互动剧本"></select>
+        <button id="btn-new-project" class="mini-pill-btn" type="button">+ 新剧本</button>
+        <button id="btn-export-project" class="mini-pill-btn" type="button">导出 MD</button>
+        <span id="branch-health-pill" class="health-pill">健康</span>
       </div>
     </div>
 
-    <nav class="nav-tabs" aria-label="主功能切换">
-      <button class="nav-tab active" data-tab="tab-drawers">1. 类型抽屉 &amp; 书架</button>
-      <button class="nav-tab" data-tab="tab-taste">2. 试菜台 &amp; 对白梗库</button>
-      <button class="nav-tab" data-tab="tab-jinghua">3. 精话锁（去AI油腻）</button>
-      <button class="nav-tab" data-tab="tab-drama">4. 互动影游·多支线画布</button>
-    </nav>
-
-    <div class="topbar-meta">
-      <span id="data-dir-badge" class="pill-badge">数据存放：加载中...</span>
-      <button id="btn-refresh-all" class="btn btn-sm" type="button">刷新数据</button>
+    <!-- 右侧仅 2 个精致胶囊按钮 -->
+    <div class="topbar-actions">
+      <button id="btn-feed-novel" class="action-pill pill-feed" type="button" title="选择本地 .txt / .docx 小说导入，或直接拖文件到标签胶囊上">
+        + 喂小说
+      </button>
+      <button id="btn-jinghua-lock" class="action-pill pill-lock" type="button" title="打开精话锁去油腻检测与禁词库">
+        🔒 精话锁 <span id="lock-rule-count" class="count-chip">0</span>
+      </button>
     </div>
   </header>
 
-  <main class="container">
-    <!-- 顶部全局概览 -->
-    <section class="stats-strip" id="stats-strip">
-      <div class="stat-card">
-        <div class="stat-label">类型抽屉</div>
-        <div class="stat-value" id="stat-genres">0</div>
-        <div class="stat-hint">不同题材各放各的，绝不串味</div>
+  <!-- 隐藏本地文件选择框 -->
+  <input id="novel-file-input" type="file" accept=".txt,.docx" hidden />
+
+  <!-- 喂小说快捷目标标签选择浮层（仅当从顶部按钮选文件且当前未选中标签，或拖到空白处时弹出） -->
+  <div id="upload-tag-popover" class="floating-popover hidden" role="dialog" aria-label="选择喂入哪个标签">
+    <div class="popover-header">
+      <div>
+        <div class="popover-title">喂入哪个标签抽屉？</div>
+        <div id="upload-file-name" class="popover-sub"></div>
       </div>
-      <div class="stat-card">
-        <div class="stat-label">已入书架小说</div>
-        <div class="stat-value" id="stat-works">0</div>
-        <div class="stat-hint">只留本地参考，绝不上传网络</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-label">待试菜原话</div>
-        <div class="stat-value" id="stat-pending">0</div>
-        <div class="stat-hint">点 ✓ 留用 / ✗ 淘汰，1分钟定口味</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-label">已入库好梗对白</div>
-        <div class="stat-value" id="stat-approved">0</div>
-        <div class="stat-hint">写新本子时直接调出来垫底</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-label">精话锁禁词规则</div>
-        <div class="stat-value" id="stat-rules">0</div>
-        <div class="stat-hint">专治AI抖机灵与夸张油腻旁白</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-label">互动影游剧本</div>
-        <div class="stat-value" id="stat-projects">0</div>
-        <div class="stat-hint">可视化连线，自动查死胡同</div>
-      </div>
-    </section>
+      <button id="upload-popover-close" class="icon-btn" type="button">×</button>
+    </div>
+    <div class="popover-search-wrap">
+      <input id="upload-tag-filter" type="text" placeholder="快速过滤标签（如 萌宝 / 穿书 / 都市）..." autocomplete="off" />
+    </div>
+    <div id="upload-tag-list" class="upload-tag-grid"></div>
+  </div>
 
-    <!-- Tab 1: 类型抽屉 & 书架 -->
-    <section id="tab-drawers" class="tab-panel active">
-      <div class="card">
-        <div class="card-header">
-          <div>
-            <h2 class="card-title">题材类型抽屉（点选任意抽屉筛选书架）</h2>
-            <p class="card-desc">写哪种类型只开哪个抽屉，防止“萌娃团宠”和“兽世修罗场”的台词味混在一起</p>
-          </div>
-          <div style="display:flex; gap:8px;">
-            <button id="btn-show-all-drawers" class="btn btn-sm" type="button">查看全部书籍</button>
-            <button id="btn-open-new-drawer" class="btn btn-primary btn-sm" type="button">＋ 新建类型抽屉</button>
-          </div>
-        </div>
-        <div id="drawer-grid" class="drawer-grid"></div>
-      </div>
-
-      <div class="grid-sidebar">
-        <div class="card">
-          <div class="card-header">
-            <div>
-              <h2 class="card-title">本地书架 &amp; 章节健康体检</h2>
-              <p class="card-desc">自动识别防盗乱码章、手打缺字章并隔离，绝不拿坏章污染你的好梗库</p>
-            </div>
-          </div>
-          <div id="works-list" class="book-list"></div>
-        </div>
-
-        <div class="card">
-          <div class="card-header">
-            <div>
-              <h2 class="card-title">本地一键喂书入库</h2>
-              <p class="card-desc">支持 .txt 及伪装成 .docx 的文本小说，自动切分章节并挑出候选对白给你试菜</p>
-            </div>
-          </div>
-          <form id="form-import-novel">
-            <div class="form-group" style="margin-bottom:10px;">
-              <label class="form-label" for="import-file-path">小说文件本地完整路径</label>
-              <input id="import-file-path" class="input" type="text" placeholder="例如：D:\1\软件\小说\毛毛.txt" required />
-            </div>
-            <div class="form-group" style="margin-bottom:10px;">
-              <label class="form-label" for="import-genre-id">放进哪个类型抽屉</label>
-              <select id="import-genre-id" class="select"></select>
-            </div>
-            <div class="form-row">
-              <div class="form-group">
-                <label class="form-label" for="import-title">书名（留空自动用文件名）</label>
-                <input id="import-title" class="input" type="text" placeholder="选填" />
-              </div>
-              <div class="form-group">
-                <label class="form-label" for="import-author">作者（选填）</label>
-                <input id="import-author" class="input" type="text" placeholder="选填" />
-              </div>
-            </div>
-            <button id="btn-import-submit" class="btn btn-primary btn-lg" type="submit" style="width:100%;">
-              一键导入并挑出试菜对白
-            </button>
-          </form>
-          <div id="import-result-box" style="margin-top:14px;"></div>
-        </div>
-      </div>
-    </section>
-
-    <!-- Tab 2: 试菜台 & 对白梗库 -->
-    <section id="tab-taste" class="tab-panel">
-      <div class="card">
-        <div class="card-header">
-          <div>
-            <h2 class="card-title">新书试菜打勾台（帮AI校准你的真实口味）</h2>
-            <p class="card-desc">刚导进来的新书会先抽几段最带劲的原话放这里，你点 ✓ 留用或 ✗ 淘汰，以后AI照着这个味找梗</p>
-          </div>
-          <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
-            <select id="taste-genre-filter" class="select" style="width:auto; min-width:150px;"></select>
-            <select id="taste-work-filter" class="select" style="width:auto; min-width:180px;"></select>
-            <button id="btn-reload-taste" class="btn btn-sm" type="button">刷新待审</button>
-          </div>
-        </div>
-        <div id="pending-snippets-list" class="taste-list"></div>
-      </div>
-
-      <div class="card">
-        <div class="card-header">
-          <div>
-            <h2 class="card-title">已入库好梗 &amp; 人物专属声音卡</h2>
-            <p class="card-desc">全都是货真价实的原书好对白、人设说话习惯和名场面钩子</p>
-          </div>
-          <div style="display:flex; gap:8px; flex-wrap:wrap;">
-            <button id="btn-open-add-snippet" class="btn btn-primary btn-sm" type="button">＋ 手动记一条好梗</button>
-            <button id="btn-open-add-char" class="btn btn-cobalt btn-sm" type="button">＋ 新建人物声音卡</button>
-            <button id="btn-open-add-highlight" class="btn btn-sm" type="button">＋ 记一个名场面</button>
-          </div>
-        </div>
-
-        <div class="sub-tabs">
-          <button class="sub-tab active" data-subtab="sub-approved-snippets">好梗对白本</button>
-          <button class="sub-tab" data-subtab="sub-characters">人物专属声音卡</button>
-          <button class="sub-tab" data-subtab="sub-highlights">名场面钩子卡</button>
-        </div>
-
-        <div class="form-row" style="margin-bottom:14px;">
-          <div class="form-group" style="max-width:210px;">
-            <select id="kb-genre-filter" class="select"></select>
-          </div>
-          <div class="form-group" style="max-width:200px;">
-            <input id="kb-scene-tag-filter" class="input" type="text" placeholder="按场景标签筛（如：反呛）" />
-          </div>
-          <div class="form-group">
-            <input id="kb-search-query" class="input" type="text" placeholder="输入关键词搜索好对白（如：零花钱、撒娇、闭嘴）" />
-          </div>
-          <button id="btn-kb-search" class="btn btn-primary" type="button">搜索</button>
-        </div>
-
-        <div id="sub-approved-snippets" class="sub-panel">
-          <div id="approved-snippets-list" class="taste-list"></div>
-        </div>
-        <div id="sub-characters" class="sub-panel" style="display:none;">
-          <div id="characters-list" class="taste-list"></div>
-        </div>
-        <div id="sub-highlights" class="sub-panel" style="display:none;">
-          <div id="highlights-list" class="taste-list"></div>
-        </div>
-      </div>
-    </section>
-
-    <!-- Tab 3: 精话锁（去AI油腻） -->
-    <section id="tab-jinghua" class="tab-panel">
-      <div class="grid-sidebar">
-        <div class="card">
-          <div class="card-header">
-            <div>
-              <h2 class="card-title">在线试测刮油台（实时揪出AI油腻旁白）</h2>
-              <p class="card-desc">把AI写的剧本或小说片段贴进来，自动把“引号外装腔作势的旁白”标红揪出来并教它改成人话</p>
-            </div>
-            <button id="btn-fill-oily-demo" class="btn btn-sm" type="button">填入一段AI油腻样例试试</button>
-          </div>
-          <div class="form-group" style="margin-bottom:12px;">
-            <textarea id="jinghua-test-input" class="textarea" rows="7" placeholder="在这里粘贴待检查的正文或台词段落……"></textarea>
-          </div>
-          <button id="btn-run-jinghua-check" class="btn btn-primary btn-lg" type="button" style="width:100%;">
-            立即用「精话锁」体检打分
-          </button>
-
-          <div id="jinghua-check-result" style="margin-top:16px; display:none;">
-            <div style="display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:10px;">
-              <div>
-                <span id="jinghua-score-badge" class="pill-badge jade" style="font-size:15px;">得分：100</span>
-                <span id="jinghua-pass-text" style="margin-left:8px; font-weight:700;"></span>
-              </div>
-            </div>
-            <div class="form-label" style="margin-bottom:6px;">标红预览（红底为命中油腻词的旁白）：</div>
-            <div id="jinghua-highlight-preview" class="highlight-preview"></div>
-            <div id="jinghua-hits-list" style="margin-top:12px;"></div>
-            <div style="margin-top:12px;">
-              <div class="form-label" style="margin-bottom:4px;">可直接发给AI的改写指令：</div>
-              <textarea id="jinghua-rewrite-guide" class="textarea" rows="3" readonly></textarea>
-            </div>
-          </div>
-        </div>
-
-        <div class="card">
-          <div class="card-header">
-            <div>
-              <h2 class="card-title">你的专属黑名单规则表</h2>
-              <p class="card-desc">遇到任何看着烦的AI套话（比如“瞬间卡壳”“眼珠子掉一地”），立刻锁死</p>
-            </div>
-          </div>
-          <form id="form-add-rule" style="margin-bottom:14px; background:var(--bg-subtle); padding:12px; border-radius:10px; border:1px solid var(--border-soft);">
-            <div class="form-row">
-              <div class="form-group">
-                <label class="form-label" for="rule-bad-pattern">讨厌的词或套话</label>
-                <input id="rule-bad-pattern" class="input" type="text" placeholder="例如：瞬间卡壳" required />
-              </div>
-              <div class="form-group" style="max-width:160px;">
-                <label class="form-label" for="rule-category">分类</label>
-                <select id="rule-category" class="select">
-                  <option value="AI油腻旁白">AI油腻旁白</option>
-                  <option value="生造网感词">生造网感词</option>
-                  <option value="小品式夸张">小品式夸张</option>
-                  <option value="其他禁用表达">其他禁用表达</option>
-                </select>
-              </div>
-            </div>
-            <div class="form-row">
-              <div class="form-group">
-                <label class="form-label" for="rule-reason">为什么讨厌它（选填）</label>
-                <input id="rule-reason" class="input" type="text" placeholder="例如：真人说话写戏不会这样形容" />
-              </div>
-              <div class="form-group">
-                <label class="form-label" for="rule-replacement">建议改成的平实写法（选填）</label>
-                <input id="rule-replacement" class="input" type="text" placeholder="例如：屋里突然安静下来，没人接话" />
-              </div>
-            </div>
-            <button class="btn btn-crimson" type="submit" style="width:100%;">＋ 锁死这个讨厌表达</button>
-          </form>
-
-          <div id="jinghua-rules-list" class="rule-list"></div>
-        </div>
-      </div>
-    </section>
-
-    <!-- Tab 4: 互动影游·多支线画布 -->
-    <section id="tab-drama" class="tab-panel">
-      <div class="card" style="padding:16px 20px;">
-        <div class="card-header" style="margin-bottom:10px;">
-          <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
-            <label class="form-label" for="drama-project-select" style="margin:0;">当前剧本：</label>
-            <select id="drama-project-select" class="select" style="width:auto; min-width:240px;"></select>
-            <button id="btn-open-new-project" class="btn btn-sm" type="button">＋ 新建互动剧本</button>
-          </div>
-          <div style="display:flex; gap:8px; flex-wrap:wrap;">
-            <button id="btn-add-node" class="btn btn-primary btn-sm" type="button">＋ 新增剧情场次</button>
-            <button id="btn-open-add-choice" class="btn btn-cobalt btn-sm" type="button">＋ 连线加玩家选项</button>
-            <button id="btn-export-markdown" class="btn btn-jade btn-sm" type="button">导出完整台本 (.md)</button>
-          </div>
-        </div>
-
-        <div id="drama-diagnostics-banner" class="diagnostics-banner ok">
-          正在加载互动剧本结构体检……
-        </div>
-
-        <div class="canvas-layout">
-          <div>
-            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; font-size:12.5px; color:var(--ink-muted);">
-              <span>提示：按住场次卡片可随意拖拽摆放位置（松手自动保存）；点击卡片在右侧改台词；点击连线上的选项标签可修改分支。</span>
-              <div style="display:flex; gap:6px; flex-wrap:wrap;">
-                <span class="pill-badge amber">起始幕</span>
-                <span class="pill-badge cobalt">普通戏</span>
-                <span class="pill-badge crimson">坏结局</span>
-                <span class="pill-badge jade">好结局</span>
-                <span class="pill-badge plum">隐藏结局</span>
-              </div>
-            </div>
-            <div class="graph-viewport" id="graph-viewport">
-              <div class="graph-stage" id="graph-stage">
-                <svg class="graph-svg" id="graph-svg" viewBox="0 0 1400 920" preserveAspectRatio="none">
-                  <defs>
-                    <marker id="arrow-head" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto">
-                      <polygon points="0 0, 10 4, 0 8" fill="#5e6573"></polygon>
-                    </marker>
-                  </defs>
-                </svg>
-                <div id="graph-edges-layer"></div>
-                <div id="graph-nodes-layer"></div>
-              </div>
-            </div>
-          </div>
-
-          <div class="card" style="margin-bottom:0; background:var(--bg-subtle);">
-            <div class="card-header">
-              <div>
-                <h3 class="card-title" id="editor-heading">选中场次台词编辑器</h3>
-                <p class="card-desc" id="editor-sub">在左侧画布点选任意场次卡片，即可在此精修台词与分支</p>
-              </div>
-            </div>
-
-            <form id="form-node-editor">
-              <input type="hidden" id="edit-node-id" />
-              <div class="form-row">
-                <div class="form-group" style="max-width:100px; min-width:90px;">
-                  <label class="form-label" for="edit-node-code">场次编号</label>
-                  <input id="edit-node-code" class="input" type="text" placeholder="S1" required />
-                </div>
-                <div class="form-group">
-                  <label class="form-label" for="edit-node-title">场次标题</label>
-                  <input id="edit-node-title" class="input" type="text" placeholder="例如：茶水间对峙" required />
-                </div>
-              </div>
-
-              <div class="form-row">
-                <div class="form-group" style="max-width:110px; min-width:95px;">
-                  <label class="form-label" for="edit-node-episode">集数</label>
-                  <input id="edit-node-episode" class="input" type="number" min="1" value="1" />
-                </div>
-                <div class="form-group">
-                  <label class="form-label" for="edit-node-type">场次性质</label>
-                  <select id="edit-node-type" class="select">
-                    <option value="start">起始幕 (start)</option>
-                    <option value="scene">普通推进戏 (scene)</option>
-                    <option value="climax">高潮冲突戏 (climax)</option>
-                    <option value="good_ending">好结局 (good_ending)</option>
-                    <option value="bad_ending">坏结局 (bad_ending)</option>
-                    <option value="hidden_ending">隐藏结局 (hidden_ending)</option>
-                  </select>
-                </div>
-                <div class="form-group" style="max-width:110px; min-width:95px;">
-                  <label class="form-label" for="edit-node-rating">满意星级</label>
-                  <select id="edit-node-rating" class="select">
-                    <option value="0">未打分</option>
-                    <option value="5">5 星超棒</option>
-                    <option value="4">4 星不错</option>
-                    <option value="3">3 星还行</option>
-                    <option value="2">2 星需改</option>
-                    <option value="1">1 星重写</option>
-                  </select>
-                </div>
-              </div>
-
-              <div class="form-group" style="margin-bottom:10px;">
-                <label class="form-label" for="edit-node-speakers">出场人物</label>
-                <input id="edit-node-speakers" class="input" type="text" placeholder="例如：女主林浅、霸总陆沉" />
-              </div>
-
-              <div class="form-group" style="margin-bottom:10px;">
-                <label class="form-label" for="edit-node-cue">镜头/演技提示（平实动作，拒绝油腻词）</label>
-                <input id="edit-node-cue" class="input" type="text" placeholder="例如：中景推近，她低头整理文件没看他" />
-              </div>
-
-              <div class="form-group" style="margin-bottom:10px;">
-                <label class="form-label" for="edit-node-script">本场剧本正文与对白</label>
-                <textarea id="edit-node-script" class="textarea" rows="7" placeholder="写明人物对白与平实动作描写……"></textarea>
-              </div>
-
-              <div class="form-group" style="margin-bottom:12px;">
-                <label class="form-label" for="edit-node-note">本次修改说明（方便留底对比）</label>
-                <input id="edit-node-note" class="input" type="text" placeholder="例如：把AI那句嘴角抽搐删掉，改成直接摔门" />
-              </div>
-
-              <div style="display:flex; flex-wrap:wrap; gap:8px; margin-bottom:12px;">
-                <button class="btn btn-primary" type="submit">保存本场剧本</button>
-                <button id="btn-node-jinghua" class="btn btn-amber" type="button" style="background:var(--amber); border-color:var(--amber); color:#fff;">过一遍精话锁</button>
-                <button id="btn-node-originality" class="btn btn-cobalt" type="button">防抄袭查重</button>
-                <button id="btn-node-revisions" class="btn" type="button">历史修改对比</button>
-                <button id="btn-node-delete" class="btn btn-crimson" type="button">删除本场</button>
-              </div>
-            </form>
-
-            <div id="node-check-feedback" style="margin-bottom:12px;"></div>
-
-            <div style="border-top:1px solid var(--border-soft); padding-top:12px;">
-              <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
-                <strong style="font-size:14px;">从本场引出的玩家分支选项</strong>
-                <button id="btn-add-choice-from-selected" class="btn btn-sm" type="button">＋ 从本场加选项</button>
-              </div>
-              <div id="selected-node-choices"></div>
-            </div>
-          </div>
-        </div>
-      </div>
-    </section>
-  </main>
-
-  <!-- 通用弹窗：新建抽屉 -->
-  <div id="modal-new-drawer" class="modal-backdrop">
-    <div class="modal-box" style="max-width:520px;">
-      <div class="modal-header">
-        <h3 class="card-title">新建题材类型抽屉</h3>
-        <button class="btn btn-sm modal-close" type="button">关闭</button>
-      </div>
-      <div class="modal-body">
-        <form id="form-new-drawer">
-          <div class="form-group" style="margin-bottom:10px;">
-            <label class="form-label" for="drawer-name-input">抽屉名称（如：年代文、末世囤货、校园甜宠）</label>
-            <input id="drawer-name-input" class="input" type="text" required />
-          </div>
-          <div class="form-group" style="margin-bottom:10px;">
-            <label class="form-label" for="drawer-id-input">抽屉英文代号（选填，留空自动生成）</label>
-            <input id="drawer-id-input" class="input" type="text" placeholder="例如：niandai" />
-          </div>
-          <div class="form-group" style="margin-bottom:10px;">
-            <label class="form-label" for="drawer-desc-input">这个抽屉专门装什么风格（选填）</label>
-            <textarea id="drawer-desc-input" class="textarea" rows="3" placeholder="例如：八零九零年代家长里短、地道市井斗嘴对白"></textarea>
-          </div>
-          <div class="form-group" style="margin-bottom:14px;">
-            <label class="form-label" for="drawer-hint-input">适合频道/平台提示（选填）</label>
-            <input id="drawer-hint-input" class="input" type="text" placeholder="例如：番茄女频 / 红果短剧" />
-          </div>
-          <button class="btn btn-primary" type="submit" style="width:100%;">保存新抽屉</button>
-        </form>
+  <!-- 新建互动剧本微型浮层 -->
+  <div id="new-project-popover" class="floating-popover compact-popover hidden" role="dialog" aria-label="新建互动支线剧本">
+    <div class="popover-header">
+      <div class="popover-title">新建互动支线剧本</div>
+      <button id="new-proj-close" class="icon-btn" type="button">×</button>
+    </div>
+    <div class="popover-body">
+      <input id="new-proj-title" class="dark-input" type="text" placeholder="剧本名称（如：总裁的试镜夜）" />
+      <input id="new-proj-synopsis" class="dark-input" type="text" placeholder="一句话冲突设定（可选）" />
+      <div class="popover-footer-row">
+        <button id="new-proj-submit" class="pill-btn-primary" type="button">创建并生成起始幕</button>
       </div>
     </div>
   </div>
 
-  <!-- 通用弹窗：书籍详情 & 原文章节阅读 -->
-  <div id="modal-book-reader" class="modal-backdrop">
-    <div class="modal-box" style="max-width:920px;">
-      <div class="modal-header">
-        <div>
-          <h3 class="card-title" id="reader-modal-title">书籍详情与原文查看</h3>
-          <p class="card-desc" id="reader-modal-sub"></p>
-        </div>
-        <button class="btn btn-sm modal-close" type="button">关闭</button>
+  <!-- 右侧极简滑出抽屉 (Slide-over Drawer, 宽 400px) -->
+  <aside id="side-drawer" class="side-drawer" aria-hidden="true">
+    <div class="drawer-header">
+      <div class="drawer-title-wrap">
+        <div id="drawer-kicker" class="drawer-kicker"></div>
+        <h2 id="drawer-title" class="drawer-title"></h2>
       </div>
-      <div class="modal-body">
-        <div id="reader-book-meta" style="margin-bottom:14px;"></div>
-        <div id="reader-chapters-area" style="margin-bottom:14px;"></div>
-        <div id="reader-span-viewer" style="display:none; border-top:1px solid var(--border-soft); padding-top:12px;">
-          <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px; margin-bottom:10px;">
-            <strong id="reader-span-title">原文内容</strong>
-            <div style="display:flex; gap:8px; align-items:center;">
-              <button id="btn-span-prev" class="btn btn-sm" type="button">上一页</button>
-              <button id="btn-span-next" class="btn btn-sm" type="button">下一页</button>
-            </div>
-          </div>
-          <div id="reader-span-lines" style="background:var(--bg-subtle); border:1px solid var(--border-soft); border-radius:10px; padding:10px; max-height:360px; overflow-y:auto;"></div>
-        </div>
+      <div class="drawer-head-actions">
+        <button id="drawer-feed-here" class="mini-pill-btn hidden" type="button">+ 喂入此标签</button>
+        <button id="drawer-close" class="icon-btn" type="button" title="收起 (Esc)">×</button>
       </div>
     </div>
-  </div>
+    <div id="drawer-body" class="drawer-body"></div>
+  </aside>
 
-  <!-- 通用弹窗：手动记一条好梗 -->
-  <div id="modal-add-snippet" class="modal-backdrop">
-    <div class="modal-box" style="max-width:580px;">
-      <div class="modal-header">
-        <h3 class="card-title">手动记一条好对白 / 好梗</h3>
-        <button class="btn btn-sm modal-close" type="button">关闭</button>
+  <!-- 「🔒 精话锁」极简浮层 -->
+  <section id="jinghua-panel" class="jinghua-panel hidden" role="dialog" aria-label="精话锁去油腻工具">
+    <div class="popover-header">
+      <div>
+        <div class="popover-title">🔒 精话锁 · 去AI油腻旁白</div>
+        <div class="popover-sub">引号内台词自动保护，只抓引号外油腻腔调</div>
       </div>
-      <div class="modal-body">
-        <form id="form-add-snippet">
-          <div class="form-row">
-            <div class="form-group">
-              <label class="form-label" for="add-snippet-genre">放进哪个抽屉</label>
-              <select id="add-snippet-genre" class="select"></select>
-            </div>
-            <div class="form-group">
-              <label class="form-label" for="add-snippet-tag">场景标签</label>
-              <input id="add-snippet-tag" class="input" type="text" placeholder="例如：反呛、护崽、装傻充愣" />
-            </div>
-          </div>
-          <div class="form-group" style="margin-bottom:10px;">
-            <label class="form-label" for="add-snippet-raw">原话对白</label>
-            <textarea id="add-snippet-raw" class="textarea" rows="4" required placeholder="尽量原汁原味保留，不要被AI改写成汇报腔"></textarea>
-          </div>
-          <div class="form-group" style="margin-bottom:10px;">
-            <label class="form-label" for="add-snippet-context">当时发生什么事（触发语境，选填）</label>
-            <input id="add-snippet-context" class="input" type="text" placeholder="例如：反派当众抢糖，小孩不哭反而一脸认真算账" />
-          </div>
-          <div class="form-group" style="margin-bottom:14px;">
-            <label class="form-label" for="add-snippet-why">为什么好笑/抓人（选填）</label>
-            <input id="add-snippet-why" class="input" type="text" placeholder="例如：一本正经说狠话，反差感拉满" />
-          </div>
-          <button class="btn btn-primary" type="submit" style="width:100%;">直接入库</button>
-        </form>
+      <button id="jinghua-close" class="icon-btn" type="button" title="关闭 (Esc)">×</button>
+    </div>
+
+    <div class="jinghua-checker">
+      <textarea id="jinghua-input" class="dark-textarea" rows="4" placeholder="贴入台本或正文片段，秒标红“瞬间卡壳 / 夹细八度 / 涨成猪肝色”等油腻旁白..."></textarea>
+      <div class="jinghua-check-bar">
+        <span id="jinghua-score-badge" class="score-badge hidden"></span>
+        <button id="jinghua-run-btn" class="pill-btn-primary" type="button">立即体检</button>
+      </div>
+      <div id="jinghua-result-box" class="jinghua-result-box hidden"></div>
+    </div>
+
+    <div class="jinghua-rules-section">
+      <div class="section-mini-title">
+        <span>禁词胶囊库</span>
+        <span id="jinghua-rules-meta" class="muted-text"></span>
+      </div>
+      <div id="jinghua-rules-cloud" class="rules-cloud"></div>
+      <div class="rule-add-row">
+        <input id="jinghua-new-pattern" class="dark-input" type="text" placeholder="输入新禁词，回车即拉黑（如：仿佛过了一个世纪）" />
       </div>
     </div>
-  </div>
+  </section>
 
-  <!-- 通用弹窗：新建人物声音卡 -->
-  <div id="modal-add-char" class="modal-backdrop">
-    <div class="modal-box" style="max-width:580px;">
-      <div class="modal-header">
-        <h3 class="card-title">新建人物专属声音卡</h3>
-        <button class="btn btn-sm modal-close" type="button">关闭</button>
-      </div>
-      <div class="modal-body">
-        <form id="form-add-char">
-          <div class="form-row">
-            <div class="form-group">
-              <label class="form-label" for="char-genre">所属类型抽屉</label>
-              <select id="char-genre" class="select"></select>
-            </div>
-            <div class="form-group">
-              <label class="form-label" for="char-name">人物姓名</label>
-              <input id="char-name" class="input" type="text" required placeholder="例如：团子 / 沈晚" />
-            </div>
-            <div class="form-group">
-              <label class="form-label" for="char-role">定位</label>
-              <input id="char-role" class="input" type="text" placeholder="例如：三岁半女主 / 毒舌哥哥" />
-            </div>
-          </div>
-          <div class="form-group" style="margin-bottom:10px;">
-            <label class="form-label" for="char-traits">性格底色（大白话）</label>
-            <input id="char-traits" class="input" type="text" required placeholder="例如：护食、嘴硬心软、谁欺负她哥就咬谁" />
-          </div>
-          <div class="form-group" style="margin-bottom:10px;">
-            <label class="form-label" for="char-speech">说话习惯 / 口癖</label>
-            <input id="char-speech" class="input" type="text" placeholder="例如：短句，爱用反问，绝不啰嗦讲大道理" />
-          </div>
-          <div class="form-group" style="margin-bottom:10px;">
-            <label class="form-label" for="char-forbidden">这个角色绝对不会说的话</label>
-            <input id="char-forbidden" class="input" type="text" placeholder="例如：禁止说教、禁止用文绉绉的成语" />
-          </div>
-          <div class="form-group" style="margin-bottom:14px;">
-            <label class="form-label" for="char-samples">代表台词（每行一句）</label>
-            <textarea id="char-samples" class="textarea" rows="3" placeholder="你再吵，我把你的糖全收进小书包。"></textarea>
-          </div>
-          <button class="btn btn-cobalt" type="submit" style="width:100%;">保存人物声音卡</button>
-        </form>
-      </div>
+  <!-- 底部极简图例栏（致敬参考图底部） -->
+  <footer class="bottom-legend" aria-label="图谱图例">
+    <span id="legend-text">
+      <span class="leg-item"><span class="leg-arrow">→</span> 连线粗细 = 积累好梗量</span>
+      <span class="leg-sep">·</span>
+      <span class="leg-item"><span class="leg-dashed"></span> 虚线胶囊 = 空抽屉/待补节点</span>
+      <span class="leg-sep">·</span>
+      <span class="leg-item"><span class="leg-halo"></span> 双环光晕 = 焦点节点</span>
+      <span class="leg-sep">·</span>
+      <span class="leg-item">滚轮缩放 / 拖拽节点 / 双击居中 / 把小说文件直接拖到标签上即可喂书</span>
+    </span>
+    <div class="zoom-controls">
+      <button id="btn-fit-view" class="zoom-btn" type="button" title="居中对齐 (双击画布)">⌖</button>
+      <span id="zoom-pct" class="zoom-pct">100%</span>
     </div>
-  </div>
+  </footer>
 
-  <!-- 通用弹窗：新建名场面钩子 -->
-  <div id="modal-add-highlight" class="modal-backdrop">
-    <div class="modal-box" style="max-width:580px;">
-      <div class="modal-header">
-        <h3 class="card-title">记录一个名场面 / 情绪钩子</h3>
-        <button class="btn btn-sm modal-close" type="button">关闭</button>
-      </div>
-      <div class="modal-body">
-        <form id="form-add-highlight">
-          <div class="form-row">
-            <div class="form-group">
-              <label class="form-label" for="hl-genre">所属类型抽屉</label>
-              <select id="hl-genre" class="select"></select>
-            </div>
-            <div class="form-group">
-              <label class="form-label" for="hl-hook-type">钩子类型</label>
-              <input id="hl-hook-type" class="input" type="text" placeholder="例如：当众打脸 / 掉马甲 / 生死二选一" />
-            </div>
-          </div>
-          <div class="form-group" style="margin-bottom:10px;">
-            <label class="form-label" for="hl-summary">大白话拆解（发生了什么反转）</label>
-            <textarea id="hl-summary" class="textarea" rows="3" required></textarea>
-          </div>
-          <div class="form-group" style="margin-bottom:14px;">
-            <label class="form-label" for="hl-why">为什么让观众忍不住往下看</label>
-            <input id="hl-why" class="input" type="text" placeholder="例如：先压抑三秒，再靠小孩一句童言无忌直接翻盘" />
-          </div>
-          <button class="btn btn-primary" type="submit" style="width:100%;">保存名场面</button>
-        </form>
-      </div>
-    </div>
-  </div>
-
-  <!-- 通用弹窗：新建互动剧本 -->
-  <div id="modal-new-project" class="modal-backdrop">
-    <div class="modal-box" style="max-width:540px;">
-      <div class="modal-header">
-        <h3 class="card-title">新建互动影游 / 多支线剧本</h3>
-        <button class="btn btn-sm modal-close" type="button">关闭</button>
-      </div>
-      <div class="modal-body">
-        <form id="form-new-project">
-          <div class="form-group" style="margin-bottom:10px;">
-            <label class="form-label" for="proj-title">剧本名称</label>
-            <input id="proj-title" class="input" type="text" required placeholder="例如：我在豪门当奶团子的七个选择" />
-          </div>
-          <div class="form-row">
-            <div class="form-group">
-              <label class="form-label" for="proj-genre">题材抽屉</label>
-              <select id="proj-genre" class="select"></select>
-            </div>
-            <div class="form-group">
-              <label class="form-label" for="proj-mode">剧本形式</label>
-              <select id="proj-mode" class="select">
-                <option value="branching">多支线互动影游</option>
-                <option value="short_drama">单线竖屏短剧</option>
-              </select>
-            </div>
-          </div>
-          <div class="form-group" style="margin-bottom:10px;">
-            <label class="form-label" for="proj-synopsis">一句话故事梗概</label>
-            <textarea id="proj-synopsis" class="textarea" rows="3" placeholder="讲清楚主角是谁、要完成什么目标、最大的悬念是什么"></textarea>
-          </div>
-          <div class="form-group" style="margin-bottom:14px;">
-            <label class="form-label" for="proj-vars">初始数值变量（JSON，比如好感度/怀疑值）</label>
-            <input id="proj-vars" class="input" type="text" value='{"好感度": 0, "怀疑值": 0}' />
-          </div>
-          <button class="btn btn-primary" type="submit" style="width:100%;">创建并打开画布</button>
-        </form>
-      </div>
-    </div>
-  </div>
-
-  <!-- 通用弹窗：新增/编辑支线选项 -->
-  <div id="modal-choice-editor" class="modal-backdrop">
-    <div class="modal-box" style="max-width:560px;">
-      <div class="modal-header">
-        <h3 class="card-title">配置玩家分支选项连线</h3>
-        <button class="btn btn-sm modal-close" type="button">关闭</button>
-      </div>
-      <div class="modal-body">
-        <form id="form-choice-editor">
-          <input type="hidden" id="choice-edit-id" />
-          <div class="form-row">
-            <div class="form-group">
-              <label class="form-label" for="choice-from-node">从哪场戏出发</label>
-              <select id="choice-from-node" class="select" required></select>
-            </div>
-            <div class="form-group">
-              <label class="form-label" for="choice-to-node">跳到哪场戏</label>
-              <select id="choice-to-node" class="select" required></select>
-            </div>
-          </div>
-          <div class="form-row">
-            <div class="form-group">
-              <label class="form-label" for="choice-label-input">屏幕上给玩家点的选项文字</label>
-              <input id="choice-label-input" class="input" type="text" required placeholder="例如：A. 当场嘴硬反呛回去" />
-            </div>
-            <div class="form-group" style="max-width:160px;">
-              <label class="form-label" for="choice-tag-input">爽点/情绪标签</label>
-              <input id="choice-tag-input" class="input" type="text" placeholder="例如：爽感硬刚" />
-            </div>
-          </div>
-          <div class="form-row">
-            <div class="form-group">
-              <label class="form-label" for="choice-condition-input">触发条件（选填）</label>
-              <input id="choice-condition-input" class="input" type="text" placeholder="例如：好感度>=10" />
-            </div>
-            <div class="form-group">
-              <label class="form-label" for="choice-delta-input">数值变化（JSON，例如 {"好感度": 10}）</label>
-              <input id="choice-delta-input" class="input" type="text" value="{}" />
-            </div>
-          </div>
-          <div style="display:flex; gap:10px;">
-            <button class="btn btn-primary" type="submit" style="flex:1;">保存分支连线</button>
-            <button id="btn-delete-choice-modal" class="btn btn-crimson" type="button" style="display:none;">删除此连线</button>
-          </div>
-        </form>
-      </div>
-    </div>
-  </div>
-
-  <!-- 通用弹窗：历史修改对比 / 导出台本 -->
-  <div id="modal-text-viewer" class="modal-backdrop">
-    <div class="modal-box" style="max-width:860px;">
-      <div class="modal-header">
-        <h3 class="card-title" id="text-viewer-title">详情查看</h3>
-        <button class="btn btn-sm modal-close" type="button">关闭</button>
-      </div>
-      <div class="modal-body" id="text-viewer-body"></div>
-    </div>
-  </div>
-
-  <div class="toast-container" id="toast-container"></div>
+  <!-- 全局轻提示 -->
+  <div id="toast-stack" class="toast-stack" aria-live="polite"></div>
 
   <script src="/static/app.js"></script>
 </body>

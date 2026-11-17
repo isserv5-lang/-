@@ -5,28 +5,31 @@
 ## 最新记忆胶囊
 
 ```markdown
-[记忆胶囊] (2026-11-18 05:57)
-- 项目目标：本地优先的跨 AI 编剧知识库（小说防盗过滤拆解、精话锁去油、原创度查重、互动影游多支线可视化工作台）已完成首版全链路研发、验收与三端接通。
+[记忆胶囊] (2026-11-18 06:22)
+- 项目目标：本地优先的跨 AI 编剧知识库已完成 **Antigravity 暗黑交互图谱 + 三频平台标签体系（v2）** 升级、全链路回归验收、正式库平滑升级与 8765 端口热更新部署。
 - 关键入口：
-  - 可视化面板：`D:\ScreenwriterKB\打开可视化知识库.cmd` 或 `screenwriter-kb\启动可视化面板.cmd`（`http://127.0.0.1:8765`）
+  - 可视化图谱工作台：`http://127.0.0.1:8765`（或双击 `D:\ScreenwriterKB\打开可视化知识库.cmd` / `screenwriter-kb\启动可视化面板.cmd`）
+  - 聚合与拖拽接口：`GET /api/graph/universe`、`POST /api/upload-novel`
   - CLI：`uv run --python 3.12 swkb [mcp|web|import|lock-check|stats|init]`
   - 测试：`uv run --python 3.12 pytest -v`（目录 `screenwriter-kb/`）
 - 当前状态：
-  - [✓] 核心模块与 Web/MCP/Skill 全部合龙打通（`uv sync --python 3.12 --all-extras` 通过）。
-  - [✓] `tests/test_e2e.py` 7 项端到端测试全绿通过（含真实样本 `云糯糯.txt` 11 章切分及伪 `.docx`《兽世万人嫌？可我是死遁的白月光..docx》236 章导入与第 18 章起 44 个防盗坏章精准标红隔离；精话锁拦截与动态加词；8-gram 查重；互动影游死胡同诊断与导出；FastAPI 全接口 200 与 12 个 MCP 工具调用）。
-  - [✓] `scripts/connect_ai_clients.py` 已实机执行：`D:\ScreenwriterKB` 初始化为空库（7 抽屉 + 26 条精话锁规则 + 1 个 4 节点演示项目，`works=0`，占用约 140.52 KB）；Codex / Claude Desktop / Antigravity 三端 MCP 与 `novel-craft-feeder` Skill 已同步并校验配置语法合法（均已备份 `.bak`）。
-  - [~] 桌面客户端 GUI 实际重启拉起 MCP 及真实浏览器点选操作待用户本机首次打开时人工确认。
+  - [✓] `src/swkb/taxonomy.py` 沉淀三大主频（`女频` 16 / `男频` 15 / `通用` 14，共 45 个番茄/红果/QQ阅读真实标签）并完成 v1→v2 平滑迁移与 `mcp_server.py` / `web_api.py` 升级。
+  - [✓] `src/swkb/static/` 重写为全屏 `#090a0d` 哑光暗黑点阵 Antigravity 胶囊图谱（`◉ 知识星图 / ◎ 互动支线`），支持拖放 `.txt`/`.docx` 到标签节点直传、血脉聚光灯、400px 极简滑出试菜抽屉及 `🔒 精话锁` 浮层（零外部 CDN）。
+  - [✓] `tests/test_e2e.py` 已更新并 7/7 全绿通过（`7 passed`，覆盖三频 45 标签、v1→v2 平滑 `ALTER TABLE` 迁移、`/api/graph/universe`、`/api/upload-novel`、真实样本防盗坏章识别、试菜 ✓/✗ + FTS5、精话锁、8-gram 查重、互动影游死胡同诊断与 12 个 MCP 工具）。
+  - [✓] `D:\ScreenwriterKB` 已通过 `scripts/connect_ai_clients.py` 完成平滑升级（`works=0` 保持干净空库，3 主频 / 45 标签 / 26 精话锁规则 / 1 个 4 节点演示项目就位）；`127.0.0.1:8765` 已重启为新版服务并实测返回最新星图数据与暗黑前端页面。
+  - [~] 真实浏览器鼠标拖拽与三端桌面客户端 GUI 重启拉起 stdio MCP 交互仍待用户本机首次打开时人工目视体验。
 - 关键决策与禁区：
   - [!] 正式库在 `D:\ScreenwriterKB`，测试与开发必须用 `SWKB_DATA_DIR` 或临时 `db_path` 隔离，绝不污染正式库或提交版权小说到 Git。
-  - [!] `web_api.py` 的 `/api/works/{work_id}/span` 已放开 `chapter_num >= 0`，以兼容 `前言/简介`（第 0 章）读取；`ingest.py` 已兼容无“第X章”标题的数字小节体短篇。
+  - [!] 保留原标签 ID `mengwa`、`shoushi`、`chongsheng`、`xuanyi`、`hudong`；旧默认空抽屉 `dushi`/`guyan` 自动迁移至 `dushi_naodong`/`gongdou`。
   - [!] 所有 `.cmd` 启动脚本必须保持 CRLF 换行 + UTF-8 无 BOM。
 - 下一步待办：
-  1. 用户可重启 Codex / Claude Desktop / Antigravity 后在对话中直接喂入小说路径体验「10 句试菜 → 精读入库 → 写稿精话锁去油」。
-  2. 用户可双击 `D:\ScreenwriterKB\打开可视化知识库.cmd` 预览 7 大抽屉与示例互动影游画布。
-- 核心上下文：swkb.config, swkb.db, swkb.ingest, swkb.jinghua_lock, swkb.originality, swkb.repository, swkb.branching, swkb.web_api, swkb.mcp_server, novel-craft-feeder
+  1. 用户直接在浏览器刷新 `http://127.0.0.1:8765` 即可体验新版 Antigravity 暗黑知识星图，并把 `.txt`/`.docx` 小说直接拖到对应标签胶囊上传。
+  2. 重启 Codex / Claude Desktop / Antigravity 后可通过升级后的 `kb_overview_and_drawers` 查看三大频与 45 个精准标签。
+- 核心上下文：swkb.taxonomy, swkb.db, swkb.repository, swkb.web_api, swkb.mcp_server, swkb.static/app.js, novel-craft-feeder
 ```
 
 ---
 
 ## 阶段演进归档（倒序精简）
-- **2026-11-18**：完成 `screenwriter-kb` 首版核心引擎、多题材知识库与互动影游画布、FastAPI 可视化工作台、12 个 stdio MCP 工具、`novel-craft-feeder` Skill、7 项 E2E 测试验收、三端连接脚本执行及跨 AI 记忆胶囊归档。
+- **2026-11-18 (v2)**：升级番茄/红果/QQ阅读三频 45 标签体系（`taxonomy.py`）、`ALTER TABLE` 平滑迁移、`GET /api/graph/universe` 与 `POST /api/upload-novel`、Antigravity 风格纯黑动态交互图谱前端、E2E 7/7 回归通过及本机正式库/8765 服务刷新。
+- **2026-11-18 (v1)**：完成 `screenwriter-kb` 首版核心引擎、多题材知识库与互动影游画布、FastAPI 可视化工作台、12 个 stdio MCP 工具、`novel-craft-feeder` Skill、7 项 E2E 测试验收、三端连接脚本执行及跨 AI 记忆胶囊归档。

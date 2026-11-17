@@ -40,10 +40,11 @@
   - Web 工作台：`src/swkb/web_api.py`（`swkb.web_api:app` / `run_server`）
 
 ## 3. 当前有效状态摘要
-- **端到端测试**：`tests/test_e2e.py` 共 7 个全链路测试全部通过（`7 passed`），覆盖 7 大抽屉预置/新建、`.txt` 与伪 `.docx` 真实小说读取及第 18 章后防盗坏章识别、试菜 ✓/✗ + FTS5 检索 + 按行回读、精话锁拦截与动态新增规则、原创度查重、互动影游死胡同诊断与导出、FastAPI `TestClient` 全核心接口 200 与 12 个 MCP 工具函数调用。
-- **正式本地保险箱（`D:\ScreenwriterKB`）**：已初始化为干净空库（占用约 140.52 KB），预置 7 大类型抽屉、26 条「精话锁」初始黑名单规则、1 个 4 节点 3 选项互动影游演示项目（`works` 表为空，等待用户自行喂书）。
+- **端到端测试**：`tests/test_e2e.py` 共 7 个全链路测试全部通过（`7 passed`），覆盖三大主频（`女频` 16 / `男频` 15 / `通用` 14，共 45 个番茄/红果/QQ阅读真实标签）与 v1→v2 平滑升级、`.txt` 与伪 `.docx` 真实小说读取及第 18 章后防盗坏章识别、试菜 ✓/✗ + FTS5 检索 + 按行回读、精话锁拦截与动态新增规则、原创度查重、互动影游死胡同诊断与导出、FastAPI `TestClient` 全核心接口 200（含 `/api/graph/universe` 图谱聚合与 `/api/upload-novel` 拖拽上传）与 12 个 MCP 工具函数调用。
+- **正式本地保险箱（`D:\ScreenwriterKB`）**：已通过 `scripts/connect_ai_clients.py` 完成平滑 schema 升级与三频标签同步，保持干净空库（`works=0`），预置 3 大主频、45 个平台精准标签、26 条「精话锁」初始黑名单规则、1 个 4 节点 3 选项互动影游演示项目。
+- **Antigravity 动态交互图谱工作台（`http://127.0.0.1:8765`）**：已升级为 `#090a0d` 哑光暗黑点阵画布与毛玻璃胶囊节点交互图谱（`◉ 知识星图 / ◎ 互动支线`），支持拖放 `.txt`/`.docx` 到标签胶囊直接喂书、血脉聚光灯与 400px 极简滑出试菜抽屉。
 - **三端连接**：已同步配置 Codex（`~/.codex/config.toml`）、Claude Desktop（`%APPDATA%\Claude\claude_desktop_config.json`）、Antigravity（`~/.gemini/config/mcp_config.json`）的 `screenwriter-kb` MCP 与 `novel-craft-feeder` Skill（均已留存 `.bak` 备份）。
-- **尚未验证 / 边界说明**：本地桌面客户端（Codex / Claude Desktop / Antigravity）重启后实际拉起 stdio MCP 子进程的 UI 交互未在 GUI 中手动点击测试；可视化前端交互通过 FastAPI `TestClient`、DOM ID 校验与 `node --check` 验证，未驱动真实桌面浏览器点击。
+- **尚未验证 / 边界说明**：本地桌面客户端（Codex / Claude Desktop / Antigravity）重启后实际拉起 stdio MCP 子进程的 UI 交互未在 GUI 中手动点击测试；可视化前端交互通过 FastAPI `TestClient`、接口联调与 `node --check` 验证，未驱动真实桌面浏览器点击。
 
 ## 4. 红线与注意事项（不可破坏）
 - **环境变量 `SWKB_DATA_DIR`**：默认指向 `D:\ScreenwriterKB`。任何自动化测试或实验必须覆盖 `SWKB_DATA_DIR` 或传入临时 `db_path`，严禁直接写入正式库。

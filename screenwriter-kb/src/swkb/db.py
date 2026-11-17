@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from swkb.config import get_db_path
+from swkb.taxonomy import LEGACY_GENRE_MIGRATION, OFFICIAL_TAGS
 
 
 def utc_now_iso() -> str:
@@ -26,6 +27,10 @@ CREATE TABLE IF NOT EXISTS genres (
     name TEXT UNIQUE NOT NULL,
     description TEXT DEFAULT '',
     channel_hint TEXT DEFAULT '',
+    channel TEXT DEFAULT '通用',
+    sub_group TEXT DEFAULT '题材主干',
+    platforms TEXT DEFAULT '',
+    sort_order INTEGER DEFAULT 0,
     created_at TEXT
 );
 
@@ -439,15 +444,90 @@ DEFAULT_JINGHUA_RULES = [
 ]
 
 
+_GENRE_MIGRATION_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("channel", "TEXT DEFAULT '通用'"),
+    ("sub_group", "TEXT DEFAULT '题材主干'"),
+    ("platforms", "TEXT DEFAULT ''"),
+    ("sort_order", "INTEGER DEFAULT 0"),
+)
+
+
+def _migrate_genres_table(conn: sqlite3.Connection) -> None:
+    """Smoothly add 3-channel taxonomy columns to existing v1 SQLite genres tables."""
+    cols = {
+        row["name"]
+        for row in conn.execute("PRAGMA table_info(genres)").fetchall()
+    }
+    for col_name, col_def in _GENRE_MIGRATION_COLUMNS:
+        if col_name not in cols:
+            conn.execute(f"ALTER TABLE genres ADD COLUMN {col_name} {col_def}")
+
+
+def _reassign_genre_references(conn: sqlite3.Connection, old_id: str, new_id: str) -> None:
+    """Reassign any records from a legacy genre_id to its new official tag ID."""
+    for table in (
+        "works",
+        "dialogue_snippets",
+        "characters",
+        "scene_highlights",
+        "script_projects",
+    ):
+        conn.execute(
+            f"UPDATE {table} SET genre_id = ? WHERE genre_id = ?",
+            (new_id, old_id),
+        )
+
+
 def _seed_genres(conn: sqlite3.Connection, now: str) -> None:
-    for gid, name, desc, hint in DEFAULT_GENRES:
+    """Idempotently sync the official 3-channel platform taxonomy and migrate legacy drawers."""
+    for tag in OFFICIAL_TAGS:
+        gid = str(tag["id"])
+        gname = str(tag["name"])
+        by_name = conn.execute(
+            "SELECT id FROM genres WHERE name = ?",
+            (gname,),
+        ).fetchone()
+        if by_name is not None and by_name["id"] != gid:
+            _reassign_genre_references(conn, str(by_name["id"]), gid)
+            conn.execute("DELETE FROM genres WHERE id = ?", (by_name["id"],))
+
         conn.execute(
             """
-            INSERT OR IGNORE INTO genres (id, name, description, channel_hint, created_at)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO genres (
+                id, name, description, channel_hint,
+                channel, sub_group, platforms, sort_order, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name,
+                description = excluded.description,
+                channel_hint = excluded.channel_hint,
+                channel = excluded.channel,
+                sub_group = excluded.sub_group,
+                platforms = excluded.platforms,
+                sort_order = excluded.sort_order
             """,
-            (gid, name, desc, hint, now),
+            (
+                gid,
+                gname,
+                str(tag.get("description", "")),
+                str(tag.get("channel_hint", "")),
+                str(tag.get("channel", "通用")),
+                str(tag.get("sub_group", "题材主干")),
+                str(tag.get("platforms", "")),
+                int(tag.get("sort_order", 0)),
+                now,
+            ),
         )
+
+    for old_id, new_id in LEGACY_GENRE_MIGRATION.items():
+        legacy_row = conn.execute(
+            "SELECT id FROM genres WHERE id = ?",
+            (old_id,),
+        ).fetchone()
+        if legacy_row is not None:
+            _reassign_genre_references(conn, old_id, new_id)
+            conn.execute("DELETE FROM genres WHERE id = ?", (old_id,))
 
 
 def _seed_jinghua_rules(conn: sqlite3.Connection, now: str) -> None:
@@ -611,12 +691,23 @@ def _seed_demo_interactive_project(conn: sqlite3.Connection, now: str) -> None:
 
 
 def init_db(conn: sqlite3.Connection) -> None:
-    """Initialize all SQLite tables, FTS5 index, and idempotent starter data."""
+    """Initialize all SQLite tables, FTS5 index, schema migrations, and idempotent starter data."""
     conn.executescript(SCHEMA_SQL)
+    _migrate_genres_table(conn)
     now = utc_now_iso()
 
-    # Always ensure the 7 default genres exist idempotently.
-    _seed_genres(conn, now)
+    # Sync the 3-channel official taxonomy once per v2 schema upgrade (or if genres is empty).
+    taxonomy_meta = conn.execute(
+        "SELECT value FROM kb_meta WHERE key = 'taxonomy_v2_synced'"
+    ).fetchone()
+    genre_count_row = conn.execute("SELECT COUNT(*) FROM genres").fetchone()
+    genre_count = int(genre_count_row[0]) if genre_count_row is not None else 0
+    if taxonomy_meta is None or genre_count == 0:
+        _seed_genres(conn, now)
+        conn.execute(
+            "INSERT OR REPLACE INTO kb_meta (key, value) VALUES ('taxonomy_v2_synced', ?)",
+            (now,),
+        )
 
     # Seed initial Jinghua Lock rules and 4-node demo project once (idempotent even if user later deletes items).
     meta_row = conn.execute(
@@ -633,7 +724,7 @@ def init_db(conn: sqlite3.Connection) -> None:
 
 
 def get_conn(db_path: Path | None = None) -> sqlite3.Connection:
-    """Open a configured SQLite connection, initializing schema on first use."""
+    """Open a configured SQLite connection, initializing or migrating schema if needed."""
     target = Path(db_path) if db_path is not None else get_db_path()
     target.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(target), timeout=30.0, check_same_thread=False)
@@ -646,4 +737,15 @@ def get_conn(db_path: Path | None = None) -> sqlite3.Connection:
     ).fetchone()
     if exists is None:
         init_db(conn)
+    else:
+        synced = None
+        meta_exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='kb_meta'"
+        ).fetchone()
+        if meta_exists is not None:
+            synced = conn.execute(
+                "SELECT 1 FROM kb_meta WHERE key = 'taxonomy_v2_synced'"
+            ).fetchone()
+        if synced is None:
+            init_db(conn)
     return conn

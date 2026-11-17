@@ -11,6 +11,7 @@ import rjieba
 
 from swkb.config import resolve_data_subdir
 from swkb.db import get_conn, init_db
+from swkb.taxonomy import CHANNEL_BY_ID, CHANNEL_BY_NAME, CHANNELS
 from swkb.models import (
     SNIPPET_STATUSES,
     dump_json_field,
@@ -112,6 +113,26 @@ def _sync_dialogue_card(snippet: dict[str, Any], db_path: Path | None) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _normalize_channel(raw: str | None) -> str:
+    """Normalize a channel identifier or Chinese label into 女频 / 男频 / 通用."""
+    val = (raw or "").strip()
+    if not val:
+        return "通用"
+    low = val.lower()
+    if low in CHANNEL_BY_ID:
+        return str(CHANNEL_BY_ID[low]["name"])
+    if val in CHANNEL_BY_NAME:
+        return val
+    return "通用"
+
+
+def _channel_id_for_name(channel_name: str) -> str:
+    entry = CHANNEL_BY_NAME.get(channel_name)
+    if entry is not None:
+        return str(entry["id"])
+    return "common"
+
+
 def _query_genres(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     rows = conn.execute(
         """
@@ -123,10 +144,28 @@ def _query_genres(conn: sqlite3.Connection) -> list[dict[str, Any]]:
             (SELECT COUNT(*) FROM characters c WHERE c.genre_id = g.id) AS character_count,
             (SELECT COUNT(*) FROM scene_highlights h WHERE h.genre_id = g.id) AS highlight_count
         FROM genres g
-        ORDER BY g.created_at ASC, g.id ASC
+        ORDER BY
+            CASE g.channel
+                WHEN '女频' THEN 1
+                WHEN '男频' THEN 2
+                WHEN '通用' THEN 3
+                ELSE 4
+            END ASC,
+            CASE WHEN COALESCE(g.sort_order, 0) > 0 THEN g.sort_order ELSE 999 END ASC,
+            g.created_at ASC,
+            g.id ASC
         """
     ).fetchall()
-    return [item for r in rows if (item := serialize_genre(r)) is not None]
+    items: list[dict[str, Any]] = []
+    for r in rows:
+        item = serialize_genre(r)
+        if item is not None:
+            item["channel"] = _normalize_channel(item.get("channel"))
+            item["sub_group"] = str(item.get("sub_group") or "题材主干")
+            item["platforms"] = str(item.get("platforms") or "")
+            item["sort_order"] = int(item.get("sort_order") or 0)
+            items.append(item)
+    return items
 
 
 def list_genres(db_path: Path | str | None = None) -> list[dict[str, Any]]:
@@ -143,6 +182,10 @@ def upsert_genre(
     name: str,
     description: str = "",
     channel_hint: str = "",
+    channel: str = "通用",
+    sub_group: str = "题材主干",
+    platforms: str = "",
+    sort_order: int | None = None,
     db_path: Path | str | None = None,
 ) -> dict[str, Any]:
     """Create or update a genre drawer."""
@@ -153,26 +196,62 @@ def upsert_genre(
     if not gname:
         raise ValueError("类型抽屉名称不能为空")
 
+    norm_channel = _normalize_channel(channel)
+    norm_sub_group = (sub_group or "").strip() or "题材主干"
+    norm_platforms = (platforms or "").strip()
+
     conn, _ = _open_conn(db_path)
     try:
         now = utc_now_iso()
-        existing = conn.execute("SELECT id FROM genres WHERE id = ?", (gid,)).fetchone()
+        existing = conn.execute(
+            "SELECT id, sort_order FROM genres WHERE id = ?",
+            (gid,),
+        ).fetchone()
         if existing is not None:
+            resolved_sort = (
+                int(sort_order)
+                if sort_order is not None
+                else int(existing["sort_order"] or 0)
+            )
             conn.execute(
                 """
                 UPDATE genres
-                SET name = ?, description = ?, channel_hint = ?
+                SET name = ?, description = ?, channel_hint = ?,
+                    channel = ?, sub_group = ?, platforms = ?, sort_order = ?
                 WHERE id = ?
                 """,
-                (gname, description or "", channel_hint or "", gid),
+                (
+                    gname,
+                    description or "",
+                    channel_hint or "",
+                    norm_channel,
+                    norm_sub_group,
+                    norm_platforms,
+                    resolved_sort,
+                    gid,
+                ),
             )
         else:
+            resolved_sort = int(sort_order) if sort_order is not None else 100
             conn.execute(
                 """
-                INSERT INTO genres (id, name, description, channel_hint, created_at)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO genres (
+                    id, name, description, channel_hint,
+                    channel, sub_group, platforms, sort_order, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (gid, gname, description or "", channel_hint or "", now),
+                (
+                    gid,
+                    gname,
+                    description or "",
+                    channel_hint or "",
+                    norm_channel,
+                    norm_sub_group,
+                    norm_platforms,
+                    resolved_sort,
+                    now,
+                ),
             )
         conn.commit()
         row = conn.execute(
@@ -191,6 +270,10 @@ def upsert_genre(
         ).fetchone()
         result = serialize_genre(row)
         assert result is not None
+        result["channel"] = _normalize_channel(result.get("channel"))
+        result["sub_group"] = str(result.get("sub_group") or "题材主干")
+        result["platforms"] = str(result.get("platforms") or "")
+        result["sort_order"] = int(result.get("sort_order") or 0)
         return result
     finally:
         conn.close()
@@ -735,6 +818,133 @@ def get_dashboard_stats(db_path: Path | str | None = None) -> dict[str, Any]:
             ),
             "total_script_projects": _count("SELECT COUNT(*) FROM script_projects"),
             "genre_breakdown": genres,
+        }
+    finally:
+        conn.close()
+
+
+def get_graph_universe(db_path: Path | str | None = None) -> dict[str, Any]:
+    """Return aggregated 3-channel knowledge graph payload (root, channels, tags, works)."""
+    conn, _ = _open_conn(db_path)
+    try:
+        def _count(sql: str, params: tuple[Any, ...] = ()) -> int:
+            row = conn.execute(sql, params).fetchone()
+            return int(row[0]) if row is not None else 0
+
+        raw_genres = _query_genres(conn)
+        channel_buckets: dict[str, dict[str, Any]] = {}
+        channels_list: list[dict[str, Any]] = []
+        for ch in CHANNELS:
+            bucket = {
+                "id": str(ch["id"]),
+                "name": str(ch["name"]),
+                "description": str(ch.get("description") or ""),
+                "sort_order": int(ch.get("sort_order") or 0),
+                "tags_count": 0,
+                "works_count": 0,
+                "approved_count": 0,
+                "pending_count": 0,
+                "characters_count": 0,
+                "highlights_count": 0,
+            }
+            channel_buckets[bucket["name"]] = bucket
+            channels_list.append(bucket)
+
+        tags: list[dict[str, Any]] = []
+        for g in raw_genres:
+            ch_name = _normalize_channel(g.get("channel"))
+            ch_id = _channel_id_for_name(ch_name)
+            works_count = int(g.get("work_count") or 0)
+            approved_count = int(g.get("approved_dialogue_count") or 0)
+            pending_count = int(g.get("pending_dialogue_count") or 0)
+            characters_count = int(g.get("character_count") or 0)
+            highlights_count = int(g.get("highlight_count") or 0)
+
+            tag_item = {
+                "id": str(g["id"]),
+                "name": str(g["name"]),
+                "channel": ch_name,
+                "channel_id": ch_id,
+                "sub_group": str(g.get("sub_group") or "题材主干"),
+                "platforms": str(g.get("platforms") or ""),
+                "description": str(g.get("description") or ""),
+                "channel_hint": str(g.get("channel_hint") or ""),
+                "sort_order": int(g.get("sort_order") or 0),
+                "works_count": works_count,
+                "approved_count": approved_count,
+                "pending_count": pending_count,
+                "characters_count": characters_count,
+                "highlights_count": highlights_count,
+            }
+            tags.append(tag_item)
+
+            target_bucket = channel_buckets.get(ch_name) or channel_buckets["通用"]
+            target_bucket["tags_count"] += 1
+            target_bucket["works_count"] += works_count
+            target_bucket["approved_count"] += approved_count
+            target_bucket["pending_count"] += pending_count
+            target_bucket["characters_count"] += characters_count
+            target_bucket["highlights_count"] += highlights_count
+
+        work_rows = conn.execute(
+            """
+            SELECT
+                w.id,
+                w.title,
+                w.author,
+                w.genre_id,
+                w.total_chapters,
+                w.clean_chapters,
+                w.corrupted_chapters,
+                w.total_chars,
+                w.created_at,
+                (SELECT COUNT(*) FROM dialogue_snippets d WHERE d.work_id = w.id AND d.status = 'approved') AS approved_count,
+                (SELECT COUNT(*) FROM dialogue_snippets d WHERE d.work_id = w.id AND d.status = 'pending') AS pending_count
+            FROM works w
+            ORDER BY w.created_at DESC
+            """
+        ).fetchall()
+        works = [
+            {
+                "id": str(r["id"]),
+                "title": str(r["title"]),
+                "author": str(r["author"] or ""),
+                "genre_id": str(r["genre_id"] or ""),
+                "total_chapters": int(r["total_chapters"] or 0),
+                "clean_chapters": int(r["clean_chapters"] or 0),
+                "corrupted_chapters": int(r["corrupted_chapters"] or 0),
+                "total_chars": int(r["total_chars"] or 0),
+                "approved_count": int(r["approved_count"] or 0),
+                "pending_count": int(r["pending_count"] or 0),
+            }
+            for r in work_rows
+        ]
+
+        root = {
+            "id": "root",
+            "name": "编剧总库",
+            "total_tags": len(tags),
+            "total_works": _count("SELECT COUNT(*) FROM works"),
+            "approved_count": _count(
+                "SELECT COUNT(*) FROM dialogue_snippets WHERE status = 'approved'"
+            ),
+            "pending_count": _count(
+                "SELECT COUNT(*) FROM dialogue_snippets WHERE status = 'pending'"
+            ),
+            "characters_count": _count("SELECT COUNT(*) FROM characters"),
+            "highlights_count": _count("SELECT COUNT(*) FROM scene_highlights"),
+            "total_jinghua_rules": _count("SELECT COUNT(*) FROM jinghua_lock_rules"),
+            "enabled_jinghua_rules": _count(
+                "SELECT COUNT(*) FROM jinghua_lock_rules WHERE enabled = 1"
+            ),
+            "total_script_projects": _count("SELECT COUNT(*) FROM script_projects"),
+        }
+
+        return {
+            "root": root,
+            "channels": channels_list,
+            "tags": tags,
+            "works": works,
         }
     finally:
         conn.close()

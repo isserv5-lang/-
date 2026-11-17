@@ -1,1693 +1,2211 @@
 (() => {
-  "use strict";
+  'use strict';
 
-  const state = {
-    genres: [],
-    works: [],
-    selectedDrawerId: "",
-    projects: [],
-    currentProjectId: "",
-    graph: { project: null, nodes: [], choices: [], diagnostics: {} },
-    selectedNodeId: "",
-    reader: {
-      workId: "",
-      chapterNum: 1,
-      lineStart: 1,
-      lineEnd: 80,
-      highlightStart: null,
-      highlightEnd: null,
-    },
-    pendingRatings: {},
-  };
+  // -------------------------------------------------------------------------
+  // 工具函数 & API 封装
+  // -------------------------------------------------------------------------
+  const $ = (sel, root = document) => root.querySelector(sel);
+  const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
 
-  // ---------- Helpers ----------
-  function $(id) {
-    return document.getElementById(id);
+  function escHtml(str) {
+    return String(str ?? '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
   }
 
-  function escapeHtml(str) {
-    return String(str ?? "")
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;")
-      .replace(/"/g, "&quot;")
-      .replace(/'/g, "&#39;");
-  }
-
-  function toast(msg, type = "info") {
-    const box = $("toast-container");
-    const el = document.createElement("div");
-    el.className = `toast ${type === "error" ? "error" : type === "success" ? "success" : ""}`;
-    el.textContent = msg;
-    box.appendChild(el);
-    setTimeout(() => {
-      el.remove();
-    }, 3400);
+  function svgEl(tag, attrs = {}) {
+    const el = document.createElementNS('http://www.w3.org/2000/svg', tag);
+    for (const [k, v] of Object.entries(attrs)) {
+      if (v !== undefined && v !== null) el.setAttribute(k, String(v));
+    }
+    return el;
   }
 
   async function api(url, options = {}) {
-    const opts = {
-      headers: { "Content-Type": "application/json" },
-      ...options,
-    };
-    const resp = await fetch(url, opts);
-    let data = {};
-    try {
-      data = await resp.json();
-    } catch {
-      data = {};
+    const opts = { ...options };
+    if (opts.body && !(opts.body instanceof FormData) && typeof opts.body !== 'string') {
+      opts.headers = { 'Content-Type': 'application/json', ...(opts.headers || {}) };
+      opts.body = JSON.stringify(opts.body);
     }
-    if (!resp.ok) {
-      throw new Error(data.detail || `请求失败 (${resp.status})`);
+    const res = await fetch(url, opts);
+    let data = null;
+    const ct = res.headers.get('content-type') || '';
+    if (ct.includes('application/json')) {
+      data = await res.json();
+    } else {
+      const text = await res.text();
+      try { data = JSON.parse(text); } catch { data = { detail: text }; }
+    }
+    if (!res.ok) {
+      throw new Error((data && (data.detail || data.message)) || `请求失败 (${res.status})`);
     }
     return data;
   }
 
-  function genreNameById(gid) {
-    const found = state.genres.find((g) => g.id === gid);
-    return found ? found.name : gid || "未分类";
+  function toast(msg, type = 'info') {
+    const stack = $('#toast-stack');
+    const div = document.createElement('div');
+    div.className = `toast ${type}`;
+    div.textContent = msg;
+    stack.appendChild(div);
+    setTimeout(() => {
+      div.style.opacity = '0';
+      div.style.transition = 'opacity 0.25s ease';
+      setTimeout(() => div.remove(), 260);
+    }, 2800);
   }
 
-  function openModal(id) {
-    $(id).classList.add("open");
-  }
+  // -------------------------------------------------------------------------
+  // 全局状态
+  // -------------------------------------------------------------------------
+  const CHANNEL_COLORS = {
+    '女频': '#f472b6',
+    '男频': '#60a5fa',
+    '通用': '#34d399',
+  };
 
-  function closeModal(id) {
-    $(id).classList.remove("open");
-  }
+  const NODE_TYPE_LABELS = {
+    start: '起始幕',
+    scene: '普通剧情',
+    climax: '高潮反转',
+    good_ending: '好结局',
+    bad_ending: '坏结局',
+    hidden_ending: '隐藏结局',
+  };
 
-  function closeAllModals() {
-    document.querySelectorAll(".modal-backdrop.open").forEach((m) => m.classList.remove("open"));
-  }
+  const state = {
+    mode: 'universe', // 'universe' | 'branching'
+    universe: {
+      root: { total_works: 0, total_approved: 0, total_pending: 0, total_jinghua_rules: 0 },
+      channels: [],
+      tags: [],
+      works: [],
+    },
+    expandedChannels: new Set(['女频', '男频', '通用']),
+    expandedTagIds: new Set(),
+    onlyPopulated: false,
+    searchQuery: '',
+    searchHitGenreIds: new Set(),
+    searchHitWorkIds: new Set(),
 
-  function nodeTypeLabel(t) {
-    const map = {
-      start: "起始幕",
-      scene: "普通戏",
-      climax: "高潮戏",
-      good_ending: "好结局",
-      bad_ending: "坏结局",
-      hidden_ending: "隐藏结局",
-    };
-    return map[t] || t || "普通戏";
-  }
+    selectedNodeId: null,
+    hoveredNodeId: null,
 
-  function formatDelta(delta) {
-    if (!delta || typeof delta !== "object") return "";
-    const parts = [];
-    for (const [k, v] of Object.entries(delta)) {
-      const num = Number(v);
-      const sign = !Number.isNaN(num) && num > 0 ? `+${num}` : `${v}`;
-      parts.push(`${k} ${sign}`);
+    // 互动支线状态
+    projects: [],
+    currentProjectId: null,
+    branchGraph: null,
+
+    // 精话锁规则
+    jinghuaRules: [],
+
+    // 待上传文件（从顶部按钮或拖到空白画布时暂存）
+    pendingUploadFile: null,
+    feedTargetGenreId: null,
+
+    // 视图平移缩放
+    view: { x: 0, y: 0, scale: 1 },
+  };
+
+  // -------------------------------------------------------------------------
+  // 物理弹簧模拟 & SVG 图谱渲染引擎
+  // -------------------------------------------------------------------------
+  const simNodes = new Map(); // id -> { id, x, y, tx, ty, vx, vy, width, height, pinned, data }
+  let simEdges = [];          // [{ id, from, to, weight, label, kind, dashed, isGood, isBad }]
+  let simGroupBoxes = [];     // [{ x, y, width, height, label }]
+  const nodeDomMap = new Map(); // id -> SVGGElement
+  const edgeDomMap = new Map(); // id -> { group, path, hit, badgeBg, badgeText }
+
+  let rafId = null;
+  let particleRafId = null;
+  let activeParticles = [];   // [{ edgeId, t, speed, el }]
+  let didInitialFit = false;
+
+  const viewportEl = $('#graph-viewport');
+  const layerGroups = $('#layer-groups');
+  const layerEdges = $('#layer-edges');
+  const layerParticles = $('#layer-particles');
+  const layerNodes = $('#layer-nodes');
+  const svgElRoot = $('#graph-svg');
+
+  function measurePillWidth(title, badge = '', hasHalo = false) {
+    // 估算中文字符 12px，ASCII 7px，含左侧圆点与右侧计数角标
+    let titleW = 0;
+    for (const ch of String(title || '')) {
+      titleW += ch.charCodeAt(0) > 255 ? 12.2 : 7.2;
     }
-    return parts.join(" · ");
+    let badgeW = badge ? String(badge).length * 7 + 12 : 0;
+    const base = 32 + titleW + badgeW + (hasHalo ? 8 : 0);
+    return Math.max(96, Math.min(270, Math.round(base)));
   }
 
-  // ---------- Tabs ----------
-  function initTabs() {
-    document.querySelectorAll(".nav-tab").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        const target = btn.dataset.tab;
-        document.querySelectorAll(".nav-tab").forEach((b) => b.classList.remove("active"));
-        document.querySelectorAll(".tab-panel").forEach((p) => p.classList.remove("active"));
-        btn.classList.add("active");
-        $(target).classList.add("active");
-      });
-    });
-
-    document.querySelectorAll(".sub-tab").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        const target = btn.dataset.subtab;
-        document.querySelectorAll(".sub-tab").forEach((b) => b.classList.remove("active"));
-        document.querySelectorAll(".sub-panel").forEach((p) => (p.style.display = "none"));
-        btn.classList.add("active");
-        $(target).style.display = "block";
-      });
-    });
-
-    document.querySelectorAll(".modal-close").forEach((btn) => {
-      btn.addEventListener("click", () => closeAllModals());
-    });
-    document.querySelectorAll(".modal-backdrop").forEach((bg) => {
-      bg.addEventListener("click", (e) => {
-        if (e.target === bg) bg.classList.remove("open");
-      });
-    });
+  function truncatePillText(text, maxChars = 15) {
+    const s = String(text || '');
+    return s.length > maxChars ? s.slice(0, maxChars - 1) + '…' : s;
   }
 
-  function switchMainTab(tabId) {
-    document.querySelectorAll(".nav-tab").forEach((b) => {
-      b.classList.toggle("active", b.dataset.tab === tabId);
-    });
-    document.querySelectorAll(".tab-panel").forEach((p) => {
-      p.classList.toggle("active", p.id === tabId);
-    });
-  }
+  function computeUniverseLayout() {
+    const { root, channels, tags, works } = state.universe;
+    const nextNodes = new Map();
+    const nextEdges = [];
+    const nextBoxes = [];
 
-  // ---------- Dashboard & Genres ----------
-  async function loadDashboard() {
-    const data = await api("/api/dashboard");
-    state.genres = data.genres || [];
-    const stats = data.stats || {};
+    const q = state.searchQuery.trim().toLowerCase();
 
-    $("data-dir-badge").textContent = `数据保险箱：${data.data_dir || "D:\\ScreenwriterKB"}`;
-    $("stat-genres").textContent = state.genres.length;
-    $("stat-works").textContent = stats.total_works ?? stats.works_count ?? 0;
-    $("stat-pending").textContent = stats.pending_taste_count ?? stats.pending_snippets ?? 0;
-    $("stat-approved").textContent = stats.total_approved_dialogues ?? stats.approved_snippets ?? 0;
-    $("stat-rules").textContent = stats.enabled_jinghua_rules ?? stats.total_jinghua_rules ?? 0;
-    $("stat-projects").textContent = stats.total_script_projects ?? stats.script_projects ?? 0;
-
-    renderDrawers();
-    populateGenreSelects();
-  }
-
-  function renderDrawers() {
-    const grid = $("drawer-grid");
-    if (!state.genres.length) {
-      grid.innerHTML = `<div class="empty-state">暂无类型抽屉，请点击右上角新建。</div>`;
-      return;
-    }
-    grid.innerHTML = state.genres
-      .map((g) => {
-        const selected = state.selectedDrawerId === g.id ? "selected" : "";
-        const workCount = g.work_count ?? g.works_count ?? 0;
-        const snippetCount = g.approved_dialogue_count ?? g.snippet_count ?? 0;
-        const charCount = g.character_count ?? 0;
-        return `
-          <button type="button" class="drawer-card ${selected}" data-genre-id="${escapeHtml(g.id)}">
-            <div style="display:flex; justify-content:space-between; align-items:center; width:100%;">
-              <span class="drawer-name">${escapeHtml(g.name)}</span>
-              <span class="pill-badge">${escapeHtml(g.id)}</span>
-            </div>
-            <div class="drawer-desc">${escapeHtml(g.description || "独立存放该题材原话与人物卡")}</div>
-            ${g.channel_hint ? `<div style="font-size:11.5px; color:var(--accent);">渠道：${escapeHtml(g.channel_hint)}</div>` : ""}
-            <div class="drawer-stats">
-              <span>书籍 ${workCount}</span>
-              <span>· 好梗 ${snippetCount}</span>
-              <span>· 人物 ${charCount}</span>
-            </div>
-          </button>
-        `;
-      })
-      .join("");
-
-    grid.querySelectorAll(".drawer-card").forEach((card) => {
-      card.addEventListener("click", async () => {
-        const gid = card.dataset.genreId;
-        state.selectedDrawerId = state.selectedDrawerId === gid ? "" : gid;
-        if (state.selectedDrawerId) {
-          $("import-genre-id").value = state.selectedDrawerId;
-        }
-        renderDrawers();
-        await loadWorks();
-      });
-    });
-  }
-
-  function populateGenreSelects() {
-    const selectIds = [
-      "import-genre-id",
-      "add-snippet-genre",
-      "char-genre",
-      "hl-genre",
-      "proj-genre",
+    // 规范化 channels 顺序：女频 / 男频 / 通用
+    const defaultChannels = [
+      { id: 'female', name: '女频' },
+      { id: 'male', name: '男频' },
+      { id: 'common', name: '通用' },
     ];
-    for (const sid of selectIds) {
-      const el = $(sid);
-      if (!el) continue;
-      const prev = el.value;
-      el.innerHTML = state.genres
-        .map((g) => `<option value="${escapeHtml(g.id)}">${escapeHtml(g.name)}</option>`)
-        .join("");
-      if (prev && state.genres.some((g) => g.id === prev)) {
-        el.value = prev;
-      } else if (sid === "proj-genre" && state.genres.some((g) => g.id === "hudong")) {
-        el.value = "hudong";
+    const channelList = defaultChannels.map((dc) => {
+      const found = (channels || []).find((c) => c.name === dc.name || c.id === dc.id);
+      return found ? { ...dc, ...found } : dc;
+    });
+
+    // 统计各标签与各频道的数据
+    const worksByGenre = new Map();
+    for (const w of works || []) {
+      const gid = w.genre_id || 'common';
+      if (!worksByGenre.has(gid)) worksByGenre.set(gid, []);
+      worksByGenre.get(gid).push(w);
+    }
+
+    const totalWorks = root?.total_works ?? (works || []).length;
+    const totalApproved = root?.approved_count ?? root?.total_approved ?? (tags || []).reduce((s, t) => s + (t.approved_count || 0), 0);
+    const totalPending = root?.pending_count ?? root?.total_pending ?? (tags || []).reduce((s, t) => s + (t.pending_count || 0), 0);
+
+    // 0 层：总库根节点
+    const rootId = 'root:kb';
+    const rootBadge = totalWorks > 0 || totalApproved > 0 ? `${totalWorks}书·${totalApproved}梗` : '总库';
+    nextNodes.set(rootId, {
+      id: rootId,
+      kind: 'root',
+      title: '编剧总库',
+      badge: rootBadge,
+      tx: 0,
+      ty: 70,
+      width: measurePillWidth('编剧总库', rootBadge, true),
+      height: 38,
+      populated: true,
+      hasHalo: true,
+      dotColor: '#93c5fd',
+      pendingCount: totalPending,
+      searchHit: q ? '编剧总库'.includes(q) : false,
+      raw: root,
+    });
+
+    // 1 层 & 2 层：按三大频道分列，保证信息量大而不乱成毛线团
+    const colWidth = 430;
+    const colGap = 44;
+    const totalSpan = channelList.length * colWidth + (channelList.length - 1) * colGap;
+    const startX = -totalSpan / 2 + colWidth / 2;
+
+    channelList.forEach((ch, colIdx) => {
+      const chName = ch.name;
+      const chCenterX = startX + colIdx * (colWidth + colGap);
+      const chTagsAll = (tags || []).filter((t) => (t.channel || '通用') === chName);
+
+      // 过滤“仅看有货”与搜索命中
+      const chTags = chTagsAll.filter((t) => {
+        const hasStock = (t.works_count || 0) > 0 || (t.approved_count || 0) > 0 || (t.pending_count || 0) > 0 || (t.characters_count || 0) > 0;
+        if (state.onlyPopulated && !hasStock) return false;
+        return true;
+      });
+
+      const chWorksCount = ch.works_count ?? chTagsAll.reduce((s, t) => s + (t.works_count || 0), 0);
+      const chApproved = ch.approved_count ?? chTagsAll.reduce((s, t) => s + (t.approved_count || 0), 0);
+      const chPending = ch.pending_count ?? chTagsAll.reduce((s, t) => s + (t.pending_count || 0), 0);
+      const chPopulated = chWorksCount > 0 || chApproved > 0 || chPending > 0;
+
+      const chId = `ch:${chName}`;
+      const chBadge = chPopulated ? `${chWorksCount}书·${chApproved}梗` : `${chTagsAll.length}标签`;
+      nextNodes.set(chId, {
+        id: chId,
+        kind: 'channel',
+        channelName: chName,
+        title: chName,
+        badge: chBadge,
+        tx: chCenterX,
+        ty: 185,
+        width: measurePillWidth(chName, chBadge, false),
+        height: 36,
+        populated: chPopulated,
+        hasHalo: false,
+        dotColor: CHANNEL_COLORS[chName] || '#7dd3fc',
+        pendingCount: chPending,
+        searchHit: q ? chName.toLowerCase().includes(q) : false,
+        raw: ch,
+      });
+
+      nextEdges.push({
+        id: `e:${rootId}->${chId}`,
+        from: rootId,
+        to: chId,
+        weight: chApproved + chWorksCount * 2,
+        weightLabel: chApproved > 0 ? String(chApproved) : (chWorksCount > 0 ? String(chWorksCount) : ''),
+        dashed: !chPopulated,
+        curveBias: (colIdx - 1) * 18,
+      });
+
+      if (!state.expandedChannels.has(chName) || chTags.length === 0) return;
+
+      // 将标签按 sub_group 分组（题材主干 / 爆款设定梗）整齐分排
+      const groupOrder = [];
+      const bySub = new Map();
+      for (const t of chTags) {
+        const sg = t.sub_group || '题材主干';
+        if (!bySub.has(sg)) {
+          bySub.set(sg, []);
+          groupOrder.push(sg);
+        }
+        bySub.get(sg).push(t);
       }
-    }
 
-    const filterIds = ["taste-genre-filter", "kb-genre-filter"];
-    for (const fid of filterIds) {
-      const el = $(fid);
-      if (!el) continue;
-      const prev = el.value;
-      el.innerHTML =
-        `<option value="">全部类型抽屉</option>` +
-        state.genres
-          .map((g) => `<option value="${escapeHtml(g.id)}">${escapeHtml(g.name)}</option>`)
-          .join("");
-      if (prev) el.value = prev;
-    }
+      let curY = 278;
+      const colsPerRow = 3;
+      const cellW = 140;
+      const rowH = 54;
+
+      groupOrder.forEach((sgName) => {
+        const items = bySub.get(sgName);
+        const rowsCount = Math.ceil(items.length / colsPerRow);
+        const boxTop = curY - 26;
+        const boxH = rowsCount * rowH + 34;
+
+        nextBoxes.push({
+          x: chCenterX - colWidth / 2 + 4,
+          y: boxTop,
+          width: colWidth - 8,
+          height: boxH,
+          label: `${chName} · ${sgName}`,
+        });
+
+        items.forEach((tag, idx) => {
+          const r = Math.floor(idx / colsPerRow);
+          const c = idx % colsPerRow;
+          const itemsInThisRow = Math.min(colsPerRow, items.length - r * colsPerRow);
+          const rowSpan = (itemsInThisRow - 1) * cellW;
+          const tx = chCenterX - rowSpan / 2 + c * cellW + (r % 2 === 1 ? 8 : -8);
+          const ty = curY + r * rowH + 14;
+
+          const worksCnt = tag.works_count || (worksByGenre.get(tag.id) || []).length;
+          const approvedCnt = tag.approved_count || 0;
+          const pendingCnt = tag.pending_count || 0;
+          const populated = worksCnt > 0 || approvedCnt > 0 || pendingCnt > 0 || (tag.characters_count || 0) > 0;
+          const badge = approvedCnt > 0
+            ? `${approvedCnt}`
+            : (pendingCnt > 0 ? `待${pendingCnt}` : (worksCnt > 0 ? `${worksCnt}书` : ''));
+
+          const tagWorks = worksByGenre.get(tag.id) || [];
+          const hitSelf = q && (
+            state.searchHitGenreIds.has(tag.id) ||
+            (tag.name || '').toLowerCase().includes(q) ||
+            (tag.description || '').toLowerCase().includes(q) ||
+            (tag.platforms || '').toLowerCase().includes(q) ||
+            tagWorks.some((w) => (w.title || '').toLowerCase().includes(q) || state.searchHitWorkIds.has(w.id))
+          );
+
+          const tagNodeId = `tag:${tag.id}`;
+          const pillTitle = truncatePillText(tag.name, 7);
+          nextNodes.set(tagNodeId, {
+            id: tagNodeId,
+            kind: 'tag',
+            genreId: tag.id,
+            channelName: chName,
+            title: pillTitle,
+            fullTitle: tag.name,
+            badge,
+            tx,
+            ty,
+            width: measurePillWidth(pillTitle, badge, false),
+            height: 32,
+            populated,
+            hasHalo: false,
+            dotColor: CHANNEL_COLORS[chName] || '#7dd3fc',
+            pendingCount: pendingCnt,
+            searchHit: Boolean(hitSelf),
+            parentId: chId,
+            raw: tag,
+          });
+
+          const edgeWeight = approvedCnt + worksCnt * 2;
+          nextEdges.push({
+            id: `e:${chId}->${tagNodeId}`,
+            from: chId,
+            to: tagNodeId,
+            weight: edgeWeight,
+            weightLabel: approvedCnt > 0 ? String(approvedCnt) : (worksCnt > 0 ? String(worksCnt) : ''),
+            dashed: !populated,
+            curveBias: (c - 1) * 14,
+          });
+
+          // 3 层：若该标签展开（或搜索直接命中旗下书名/台词梗），在其下方生长出《书名》胶囊
+          const workHit = q && tagWorks.some((w) => (w.title || '').toLowerCase().includes(q) || state.searchHitWorkIds.has(w.id));
+          if ((state.expandedTagIds.has(tag.id) || workHit) && tagWorks.length > 0) {
+            const wGap = 158;
+            const wSpan = (tagWorks.length - 1) * wGap;
+            tagWorks.forEach((w, wIdx) => {
+              const wx = tx - wSpan / 2 + wIdx * wGap;
+              const wy = ty + 78 + (wIdx % 2) * 18;
+              const wId = `work:${w.id}`;
+              const wTitle = `《${truncatePillText(w.title, 8)}》`;
+              const cleanCh = w.clean_chapters ?? 0;
+              const corrCh = w.corrupted_chapters ?? 0;
+              const wBadge = corrCh > 0 ? `${cleanCh}净/${corrCh}防` : `${cleanCh}章`;
+
+              nextNodes.set(wId, {
+                id: wId,
+                kind: 'work',
+                workId: w.id,
+                genreId: tag.id,
+                title: wTitle,
+                fullTitle: w.title,
+                badge: wBadge,
+                tx: wx,
+                ty: wy,
+                width: measurePillWidth(wTitle, wBadge, false),
+                height: 32,
+                populated: true,
+                hasHalo: false,
+                dotColor: corrCh > 0 ? '#fbbf24' : '#7dd3fc',
+                pendingCount: 0,
+                searchHit: q ? ((w.title || '').toLowerCase().includes(q) || state.searchHitWorkIds.has(w.id)) : false,
+                parentId: tagNodeId,
+                raw: w,
+              });
+
+              nextEdges.push({
+                id: `e:${tagNodeId}->${wId}`,
+                from: tagNodeId,
+                to: wId,
+                weight: Math.max(1, Math.min(8, Math.round(cleanCh / 3))),
+                weightLabel: cleanCh > 0 ? String(cleanCh) : '',
+                dashed: false,
+                curveBias: (wIdx - (tagWorks.length - 1) / 2) * 12,
+              });
+            });
+          }
+        });
+
+        curY += rowsCount * rowH + 46;
+      });
+    });
+
+    applyLayoutTargets(nextNodes, nextEdges, nextBoxes);
   }
 
-  // ---------- Works & Reader ----------
-  async function loadWorks() {
-    const q = state.selectedDrawerId ? `?genre_id=${encodeURIComponent(state.selectedDrawerId)}` : "";
-    const data = await api(`/api/works${q}`);
-    state.works = data.items || [];
-    renderWorks();
-    populateWorkFilter();
-  }
+  function computeBranchingLayout() {
+    const graph = state.branchGraph;
+    const nextNodes = new Map();
+    const nextEdges = [];
+    const nextBoxes = [];
 
-  function populateWorkFilter() {
-    const el = $("taste-work-filter");
-    if (!el) return;
-    const prev = el.value;
-    el.innerHTML =
-      `<option value="">全部小说来源</option>` +
-      state.works.map((w) => `<option value="${escapeHtml(w.id)}">《${escapeHtml(w.title)}》</option>`).join("");
-    if (prev) el.value = prev;
-  }
-
-  function renderWorks() {
-    const list = $("works-list");
-    if (!state.works.length) {
-      list.innerHTML = `
-        <div class="empty-state" style="grid-column:1/-1;">
-          ${state.selectedDrawerId ? "这个类型抽屉里还没有导书，可以在右侧粘贴本地小说路径一键导入。" : "书架目前是空的，你可以在右侧填入本地小说路径一键喂书。"}
-        </div>`;
+    if (!graph || !graph.nodes || graph.nodes.length === 0) {
+      applyLayoutTargets(nextNodes, nextEdges, nextBoxes);
       return;
     }
-    list.innerHTML = state.works
-      .map((w) => {
-        const total = Number(w.total_chapters || 0);
-        const clean = Number(w.clean_chapters || 0);
-        const bad = Number(w.corrupted_chapters || 0);
-        const ratio = total > 0 ? Math.round((clean / total) * 100) : 100;
-        return `
-          <div class="book-card">
-            <div class="book-header">
-              <div>
-                <h3 class="book-title">《${escapeHtml(w.title)}》</h3>
-                <div style="font-size:12.5px; color:var(--ink-muted);">
-                  ${escapeHtml(w.author || "佚名")} · ${(Number(w.total_chars || 0) / 10000).toFixed(1)} 万字
-                </div>
-              </div>
-              <span class="pill-badge cobalt">${escapeHtml(genreNameById(w.genre_id))}</span>
-            </div>
-            <div>
-              <div style="display:flex; justify-content:space-between; font-size:12.5px; margin-bottom:5px;">
-                <span style="color:var(--jade); font-weight:600;">完好可用：${clean} 章</span>
-                <span style="color:${bad > 0 ? "var(--crimson)" : "var(--ink-muted)"}; font-weight:600;">
-                  已隔离防盗坏章：${bad} 章
-                </span>
-              </div>
-              <div class="health-bar"><div class="health-bar-fill" style="width:${ratio}%;"></div></div>
-            </div>
-            <div style="font-size:12.5px; color:var(--ink-secondary); min-height:20px;">
-              ${w.summary_one_page ? escapeHtml(w.summary_one_page).slice(0, 72) + "…" : "暂未填写一页纸核心卖点摘要"}
-            </div>
-            <div style="display:flex; gap:8px; margin-top:auto;">
-              <button class="btn btn-sm btn-primary" type="button" data-open-book="${escapeHtml(w.id)}" style="flex:1;">
-                查看章节健康度 &amp; 读原文
-              </button>
-              <button class="btn btn-sm" type="button" data-taste-book="${escapeHtml(w.id)}">
-                去试菜
-              </button>
-            </div>
-          </div>
-        `;
-      })
-      .join("");
 
-    list.querySelectorAll("[data-open-book]").forEach((btn) => {
-      btn.addEventListener("click", () => openBookReaderModal(btn.dataset.openBook));
-    });
-    list.querySelectorAll("[data-taste-book]").forEach((btn) => {
-      btn.addEventListener("click", async () => {
-        $("taste-work-filter").value = btn.dataset.tasteBook;
-        switchMainTab("tab-taste");
-        await loadPendingSnippets();
+    const deadSet = new Set(graph.diagnostics?.dead_end_node_ids || []);
+    const unreachableSet = new Set(graph.diagnostics?.unreachable_node_ids || []);
+
+    for (const n of graph.nodes) {
+      const nid = `bnode:${n.id}`;
+      const isGood = n.node_type === 'good_ending';
+      const isBad = n.node_type === 'bad_ending';
+      const isHidden = n.node_type === 'hidden_ending';
+      const isStart = n.node_type === 'start';
+      const isDead = deadSet.has(n.id) || unreachableSet.has(n.id);
+
+      const label = `${n.node_code || 'S'} · ${truncatePillText(n.title, 10)}`;
+      const badge = NODE_TYPE_LABELS[n.node_type] || '';
+      let dotColor = '#7dd3fc';
+      if (isGood) dotColor = '#fbbf24';
+      else if (isBad) dotColor = '#f87171';
+      else if (isHidden) dotColor = '#a78bfa';
+      else if (n.node_type === 'climax') dotColor = '#f472b6';
+      else if (isDead) dotColor = '#94a3b8';
+
+      nextNodes.set(nid, {
+        id: nid,
+        kind: 'branch_node',
+        storyNodeId: n.id,
+        title: label,
+        fullTitle: n.title,
+        badge,
+        tx: (n.pos_x ?? 120) * 1.45,
+        ty: (n.pos_y ?? 120) * 1.25,
+        width: measurePillWidth(label, badge, isStart || isGood || isBad || isHidden),
+        height: 36,
+        populated: !isDead && Boolean((n.script_text || '').trim() || isGood || isBad || isHidden),
+        hasHalo: isStart || isGood || isBad || isHidden,
+        haloKind: isGood ? 'good' : isBad ? 'bad' : isHidden ? 'hidden' : 'start',
+        dotColor,
+        pendingCount: isDead ? 1 : 0,
+        searchHit: false,
+        raw: n,
       });
-    });
+    }
+
+    for (const ch of graph.choices || []) {
+      const fromId = `bnode:${ch.from_node_id}`;
+      const toId = `bnode:${ch.to_node_id}`;
+      const targetNode = nextNodes.get(toId);
+      const isGood = targetNode?.haloKind === 'good';
+      const isBad = targetNode?.haloKind === 'bad';
+      nextEdges.push({
+        id: `bchoice:${ch.id}`,
+        choiceId: ch.id,
+        from: fromId,
+        to: toId,
+        weight: 3,
+        choiceLabel: truncatePillText(ch.choice_label, 18),
+        dashed: false,
+        isGood,
+        isBad,
+        curveBias: 16,
+      });
+    }
+
+    applyLayoutTargets(nextNodes, nextEdges, nextBoxes);
   }
 
-  async function openBookReaderModal(workId, jumpChapter = null, hlStart = null, hlEnd = null) {
-    try {
-      const data = await api(`/api/works/${encodeURIComponent(workId)}`);
-      const w = data.work;
-      state.reader.workId = workId;
-      state.reader.highlightStart = hlStart;
-      state.reader.highlightEnd = hlEnd;
-
-      $("reader-modal-title").textContent = `《${w.title}》 · 章节体检与原文查看`;
-      $("reader-modal-sub").textContent = `所属抽屉：${genreNameById(w.genre_id)} · 共 ${w.total_chapters} 章（完好 ${w.clean_chapters} 章 / 已隔离坏章 ${w.corrupted_chapters} 章）`;
-
-      $("reader-book-meta").innerHTML = `
-        <div style="background:var(--bg-subtle); border:1px solid var(--border-soft); border-radius:10px; padding:12px;">
-          <div class="form-label" style="margin-bottom:4px;">本书一页纸卖点与风格备注</div>
-          <div style="display:flex; gap:8px; flex-wrap:wrap;">
-            <input id="reader-summary-input" class="input" type="text" value="${escapeHtml(w.summary_one_page || "")}" placeholder="写一句本书最大看点/风格提醒" style="flex:1;" />
-            <button id="btn-save-book-summary" class="btn btn-sm btn-primary" type="button">保存备注</button>
-          </div>
-        </div>
-      `;
-
-      $("btn-save-book-summary").addEventListener("click", async () => {
-        try {
-          await api(`/api/works/${encodeURIComponent(workId)}/summary`, {
-            method: "PUT",
-            body: JSON.stringify({
-              summary_one_page: $("reader-summary-input").value,
-              style_notes: w.style_notes || "",
-            }),
-          });
-          toast("已更新书籍备注", "success");
-          await loadWorks();
-        } catch (err) {
-          toast(err.message, "error");
+  function applyLayoutTargets(nextNodes, nextEdges, nextBoxes) {
+    // 保留已有节点的当前坐标与速度，新增节点从父节点平滑弹簧长出
+    for (const [id, spec] of nextNodes.entries()) {
+      const prev = simNodes.get(id);
+      if (prev) {
+        prev.title = spec.title;
+        prev.fullTitle = spec.fullTitle;
+        prev.badge = spec.badge;
+        prev.width = spec.width;
+        prev.height = spec.height;
+        prev.populated = spec.populated;
+        prev.hasHalo = spec.hasHalo;
+        prev.haloKind = spec.haloKind;
+        prev.dotColor = spec.dotColor;
+        prev.pendingCount = spec.pendingCount;
+        prev.searchHit = spec.searchHit;
+        prev.raw = spec.raw;
+        prev.kind = spec.kind;
+        prev.genreId = spec.genreId;
+        prev.workId = spec.workId;
+        prev.channelName = spec.channelName;
+        prev.storyNodeId = spec.storyNodeId;
+        prev.parentId = spec.parentId;
+        if (!prev.pinned) {
+          prev.tx = spec.tx;
+          prev.ty = spec.ty;
         }
-      });
-
-      const chapters = w.chapters || [];
-      if (!chapters.length) {
-        $("reader-chapters-area").innerHTML = `<div class="empty-state">这本书暂无章节切片记录。</div>`;
       } else {
-        $("reader-chapters-area").innerHTML = `
-          <div class="form-label" style="margin-bottom:6px;">点任意章节即可查看原文（红字标出的是系统自动隔离的防盗乱码章）：</div>
-          <div class="chapter-pills">
-            ${chapters
-              .map((ch) => {
-                const bad = Number(ch.is_corrupted || 0) === 1;
-                const label = `第${ch.chapter_num}章 ${ch.title || ""}`.trim();
-                const hint = bad ? ` [已隔离: ${ch.corruption_reason || "异常"}]` : "";
-                return `<button type="button" class="chapter-pill ${bad ? "corrupted" : ""}" data-ch="${ch.chapter_num}">${escapeHtml(label + hint)}</button>`;
-              })
-              .join("")}
-          </div>
-        `;
-        $("reader-chapters-area").querySelectorAll("[data-ch]").forEach((btn) => {
-          btn.addEventListener("click", () => {
-            const cnum = Number(btn.dataset.ch);
-            loadChapterSpan(workId, cnum, 1, 80);
-          });
+        const parent = spec.parentId ? (simNodes.get(spec.parentId) || nextNodes.get(spec.parentId)) : null;
+        simNodes.set(id, {
+          ...spec,
+          x: parent ? (parent.x ?? parent.tx) : spec.tx,
+          y: parent ? (parent.y ?? parent.ty) : spec.ty - 14,
+          vx: 0,
+          vy: 0,
+          pinned: false,
         });
       }
-
-      if (jumpChapter) {
-        const s = Math.max(1, (hlStart || 1) - 10);
-        const e = s + 79;
-        await loadChapterSpan(workId, jumpChapter, s, e);
-      } else {
-        $("reader-span-viewer").style.display = "none";
-      }
-
-      openModal("modal-book-reader");
-    } catch (err) {
-      toast(err.message, "error");
     }
+
+    // 删除已不在当前视图的节点
+    for (const id of Array.from(simNodes.keys())) {
+      if (!nextNodes.has(id)) {
+        simNodes.delete(id);
+      }
+    }
+
+    simEdges = nextEdges;
+    simGroupBoxes = nextBoxes;
+
+    rebuildSvgDom();
+    startPhysicsLoop();
   }
 
-  async function loadChapterSpan(workId, chapterNum, lineStart, lineEnd) {
-    try {
-      const data = await api(
-        `/api/works/${encodeURIComponent(workId)}/span?chapter_num=${chapterNum}&line_start=${lineStart}&line_end=${lineEnd}`
-      );
-      const span = data.span || {};
-      state.reader.chapterNum = chapterNum;
-      state.reader.lineStart = span.line_start || lineStart;
-      state.reader.lineEnd = span.line_end || lineEnd;
+  function rebuildSvgDom() {
+    // 1. 分组框与微标题
+    layerGroups.innerHTML = '';
+    for (const box of simGroupBoxes) {
+      const rect = svgEl('rect', {
+        class: 'group-box-frame',
+        x: box.x,
+        y: box.y,
+        width: box.width,
+        height: box.height,
+      });
+      const label = svgEl('text', {
+        class: 'group-header-label',
+        x: box.x + 12,
+        y: box.y + 15,
+      });
+      label.textContent = box.label;
+      layerGroups.appendChild(rect);
+      layerGroups.appendChild(label);
+    }
 
-      $("reader-span-viewer").style.display = "block";
-      const chTitle = span.chapter_title ? `第${chapterNum}章 ${span.chapter_title}` : `第${chapterNum}章`;
-      const badTag = span.is_corrupted ? ` ⚠️ [已隔离防盗/坏章：${span.corruption_reason || "异常"}]` : "";
-      $("reader-span-title").textContent = `${chTitle}（第 ${state.reader.lineStart} ~ ${state.reader.lineEnd} 行 / 共 ${span.total_chapter_lines || "?"} 行）${badTag}`;
-      $("btn-span-prev").disabled = state.reader.lineStart <= 1;
-      $("btn-span-next").disabled = Boolean(span.total_chapter_lines && state.reader.lineEnd >= span.total_chapter_lines);
+    // 2. 连线
+    layerEdges.innerHTML = '';
+    edgeDomMap.clear();
+    for (const edge of simEdges) {
+      const g = svgEl('g', { class: 'edge-group', 'data-edge-id': edge.id });
+      const strokeW = edge.dashed ? 1.15 : (1.35 + Math.min(3.3, Math.log2((edge.weight || 1) + 1) * 0.95));
+      const markerEnd = edge.isGood
+        ? 'url(#arrow-good)'
+        : edge.isBad
+          ? 'url(#arrow-bad)'
+          : 'url(#arrow-muted)';
 
-      let lines = span.lines;
-      if (!Array.isArray(lines)) {
-        const raw = String(span.text || span.content || "");
-        lines = raw ? raw.split(/\r?\n/).map((t, idx) => ({ line_num: state.reader.lineStart + idx, text: t })) : [];
+      const path = svgEl('path', {
+        class: `edge-path ${edge.dashed ? 'is-dashed' : 'is-populated'} ${edge.isGood ? 'is-good' : ''} ${edge.isBad ? 'is-bad' : ''}`,
+        'stroke-width': strokeW.toFixed(2),
+        'marker-end': markerEnd,
+      });
+      const hit = svgEl('path', { class: 'edge-hit' });
+      g.appendChild(path);
+      g.appendChild(hit);
+
+      let badgeBg = null;
+      let badgeText = null;
+      if (edge.choiceLabel) {
+        badgeBg = svgEl('rect', { class: 'edge-choice-pill', height: 18 });
+        badgeText = svgEl('text', { class: 'edge-choice-text' });
+        badgeText.textContent = edge.choiceLabel;
+        g.appendChild(badgeBg);
+        g.appendChild(badgeText);
+      } else if (edge.weightLabel) {
+        badgeBg = svgEl('rect', { class: 'edge-weight-bg', rx: 6, height: 14 });
+        badgeText = svgEl('text', { class: 'edge-weight-text' });
+        badgeText.textContent = edge.weightLabel;
+        g.appendChild(badgeBg);
+        g.appendChild(badgeText);
       }
 
-      $("reader-span-lines").innerHTML = lines.length
-        ? lines
-            .map((item, idx) => {
-              const ln = typeof item === "object" ? item.line_num ?? item.line ?? state.reader.lineStart + idx : state.reader.lineStart + idx;
-              const txt = typeof item === "object" ? item.text ?? "" : String(item);
-              const isHl =
-                state.reader.highlightStart &&
-                ln >= state.reader.highlightStart &&
-                ln <= (state.reader.highlightEnd || state.reader.highlightStart);
-              return `<div class="span-line ${isHl ? "highlight" : ""}"><span class="span-ln">L${ln}</span><span>${escapeHtml(txt || " ")}</span></div>`;
-            })
-            .join("")
-        : `<div class="empty-state">这一页没有文本内容。</div>`;
-    } catch (err) {
-      toast(err.message, "error");
-    }
-  }
-
-  // ---------- Tab 2: Taste Check & Knowledge Base ----------
-  async function loadPendingSnippets() {
-    const gid = $("taste-genre-filter").value;
-    const wid = $("taste-work-filter").value;
-    const params = new URLSearchParams({ status: "pending", limit: "30" });
-    if (gid) params.set("genre_id", gid);
-    if (wid) params.set("work_id", wid);
-
-    const data = await api(`/api/snippets?${params.toString()}`);
-    const items = data.items || [];
-    const list = $("pending-snippets-list");
-
-    if (!items.length) {
-      list.innerHTML = `<div class="empty-state" style="grid-column:1/-1;">目前没有待试菜的新对白啦！你可以先去「类型抽屉 &amp; 书架」导入一本小说，系统会自动挑出候选题材对白放这里。</div>`;
-      return;
+      layerEdges.appendChild(g);
+      edgeDomMap.set(edge.id, { group: g, path, hit, badgeBg, badgeText, edge });
     }
 
-    list.innerHTML = items
-      .map((s) => {
-        const curRating = state.pendingRatings[s.id] || s.rating || 4;
-        const stars = [1, 2, 3, 4, 5]
-          .map(
-            (n) =>
-              `<button type="button" class="star-btn ${n <= curRating ? "active" : ""}" data-rate-snippet="${escapeHtml(s.id)}" data-star="${n}">★</button>`
-          )
-          .join("");
-        const sourceInfo = s.chapter_num
-          ? `第${s.chapter_num}章 ${s.line_start ? `L${s.line_start}` : ""}`
-          : "本地导入";
-        return `
-          <div class="snippet-card pending" data-snippet-card="${escapeHtml(s.id)}">
-            <div style="display:flex; justify-content:space-between; align-items:center; gap:8px;">
-              <span class="pill-badge amber">${escapeHtml(genreNameById(s.genre_id))} · ${escapeHtml(sourceInfo)}</span>
-              <div class="star-row">${stars}</div>
-            </div>
-            <div class="snippet-quote">${escapeHtml(s.raw_text)}</div>
-            ${s.trigger_context ? `<div style="font-size:12.5px; color:var(--ink-secondary);">语境：${escapeHtml(s.trigger_context)}</div>` : ""}
-            <div class="form-row" style="margin-bottom:0;">
-              <input class="input" type="text" data-tag-input="${escapeHtml(s.id)}" value="${escapeHtml(s.scene_tag || "")}" placeholder="顺手打个场景标签（如：装傻反呛）" style="padding:6px 10px; font-size:13px;" />
-              ${
-                s.work_id && s.chapter_num
-                  ? `<button type="button" class="btn btn-sm" data-jump-source="${escapeHtml(s.work_id)}" data-ch="${s.chapter_num}" data-ls="${s.line_start || 1}" data-le="${s.line_end || s.line_start || 1}">回看原文</button>`
-                  : ""
-              }
-            </div>
-            <div class="snippet-actions">
-              <button type="button" class="btn btn-jade" data-review-id="${escapeHtml(s.id)}" data-decision="approved">✓ 对味留用</button>
-              <button type="button" class="btn btn-crimson" data-review-id="${escapeHtml(s.id)}" data-decision="rejected">✗ 无感淘汰</button>
-            </div>
-          </div>
-        `;
-      })
-      .join("");
+    // 3. 胶囊节点
+    layerNodes.innerHTML = '';
+    nodeDomMap.clear();
+    for (const node of simNodes.values()) {
+      const g = svgEl('g', {
+        class: `node-group ${node.populated ? '' : 'is-empty-node'}`,
+        'data-node-id': node.id,
+        transform: `translate(${node.x}, ${node.y})`,
+      });
 
-    list.querySelectorAll("[data-rate-snippet]").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        const sid = btn.dataset.rateSnippet;
-        const star = Number(btn.dataset.star);
-        state.pendingRatings[sid] = star;
-        const row = btn.parentElement;
-        row.querySelectorAll(".star-btn").forEach((b) => {
-          b.classList.toggle("active", Number(b.dataset.star) <= star);
+      const hw = node.width / 2;
+      const hh = node.height / 2;
+
+      // 双层外环光晕（Root / Selected / Ending）
+      const halo = svgEl('rect', {
+        class: `node-halo ${node.haloKind ? `halo-${node.haloKind}` : ''}`,
+        x: -hw - 4.5,
+        y: -hh - 4.5,
+        width: node.width + 9,
+        height: node.height + 9,
+        rx: (node.height + 9) / 2,
+        display: node.hasHalo || state.selectedNodeId === node.id ? 'block' : 'none',
+      });
+      g.appendChild(halo);
+
+      // 主胶囊体
+      const pill = svgEl('rect', {
+        class: `node-pill ${node.populated ? '' : 'is-empty'}`,
+        x: -hw,
+        y: -hh,
+        width: node.width,
+        height: node.height,
+        rx: hh,
+      });
+      g.appendChild(pill);
+
+      // 左侧状态圆点（空节点为参考图同款空心环 o，有货为呼吸亮色圆点 ●）
+      if (node.populated) {
+        const dot = svgEl('circle', {
+          class: 'node-dot-solid node-dot-breathing',
+          cx: -hw + 14,
+          cy: 0,
+          r: 3.8,
+          fill: node.dotColor || '#7dd3fc',
         });
-      });
-    });
-
-    list.querySelectorAll("[data-review-id]").forEach((btn) => {
-      btn.addEventListener("click", async () => {
-        const sid = btn.dataset.reviewId;
-        const decision = btn.dataset.decision;
-        const tagInput = list.querySelector(`[data-tag-input="${CSS.escape(sid)}"]`);
-        const rating = state.pendingRatings[sid] || 4;
-        try {
-          await api(`/api/snippets/${encodeURIComponent(sid)}/review`, {
-            method: "POST",
-            body: JSON.stringify({
-              status: decision,
-              rating: decision === "approved" ? rating : 0,
-              scene_tag: tagInput ? tagInput.value.trim() : "",
-            }),
-          });
-          toast(decision === "approved" ? "已收进你的好梗库！" : "已淘汰这条", "success");
-          await Promise.all([loadDashboard(), loadPendingSnippets(), loadApprovedSnippets()]);
-        } catch (err) {
-          toast(err.message, "error");
-        }
-      });
-    });
-
-    bindSourceJumpButtons(list);
-  }
-
-  function bindSourceJumpButtons(container) {
-    container.querySelectorAll("[data-jump-source]").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        openBookReaderModal(
-          btn.dataset.jumpSource,
-          Number(btn.dataset.ch || 1),
-          Number(btn.dataset.ls || 1),
-          Number(btn.dataset.le || 1)
-        );
-      });
-    });
-  }
-
-  async function loadApprovedSnippets() {
-    const gid = $("kb-genre-filter").value;
-    const tag = $("kb-scene-tag-filter").value.trim();
-    const q = $("kb-search-query").value.trim();
-    const params = new URLSearchParams({ status: "approved", limit: "60" });
-    if (gid) params.set("genre_id", gid);
-    if (tag) params.set("scene_tag", tag);
-    if (q) params.set("query", q);
-
-    const data = await api(`/api/snippets?${params.toString()}`);
-    const items = data.items || [];
-    const list = $("approved-snippets-list");
-
-    if (!items.length) {
-      list.innerHTML = `<div class="empty-state" style="grid-column:1/-1;">这个抽屉下暂无已入库好梗，试试清空筛选条件或去上方试菜台勾几条，也可点击右上角手动记一条。</div>`;
-      return;
-    }
-
-    list.innerHTML = items
-      .map((s) => {
-        const stars = s.rating ? "★".repeat(Number(s.rating)) : "未打星";
-        return `
-          <div class="snippet-card">
-            <div style="display:flex; justify-content:space-between; align-items:center; gap:8px;">
-              <div style="display:flex; gap:6px; flex-wrap:wrap;">
-                <span class="pill-badge jade">${escapeHtml(genreNameById(s.genre_id))}</span>
-                ${s.scene_tag ? `<span class="pill-badge cobalt">${escapeHtml(s.scene_tag)}</span>` : ""}
-              </div>
-              <span style="color:#e0961c; font-size:13px;">${escapeHtml(stars)}</span>
-            </div>
-            <div class="snippet-quote">${escapeHtml(s.raw_text)}</div>
-            ${s.trigger_context ? `<div style="font-size:12.5px; color:var(--ink-secondary);">触发情境：${escapeHtml(s.trigger_context)}</div>` : ""}
-            ${s.why_funny_or_effective ? `<div style="font-size:12.5px; color:var(--ink-muted);">好在哪里：${escapeHtml(s.why_funny_or_effective)}</div>` : ""}
-            ${
-              s.work_id && s.chapter_num
-                ? `<div style="margin-top:auto;"><button type="button" class="btn btn-sm" data-jump-source="${escapeHtml(s.work_id)}" data-ch="${s.chapter_num}" data-ls="${s.line_start || 1}" data-le="${s.line_end || s.line_start || 1}">查看原书出处（第${s.chapter_num}章）</button></div>`
-                : ""
-            }
-          </div>
-        `;
-      })
-      .join("");
-
-    bindSourceJumpButtons(list);
-  }
-
-  async function loadCharacters() {
-    const gid = $("kb-genre-filter").value;
-    const params = new URLSearchParams();
-    if (gid) params.set("genre_id", gid);
-    const data = await api(`/api/characters?${params.toString()}`);
-    const items = data.items || [];
-    const list = $("characters-list");
-
-    if (!items.length) {
-      list.innerHTML = `<div class="empty-state" style="grid-column:1/-1;">暂无人物专属声音卡，点击右上角「＋ 新建人物声音卡」记录主角口癖与说话忌口。</div>`;
-      return;
-    }
-
-    list.innerHTML = items
-      .map((c) => {
-        const samples = Array.isArray(c.sample_lines) ? c.sample_lines : [];
-        return `
-          <div class="snippet-card">
-            <div style="display:flex; justify-content:space-between; align-items:center;">
-              <strong style="font-size:16px;">${escapeHtml(c.name)}</strong>
-              <span class="pill-badge cobalt">${escapeHtml(genreNameById(c.genre_id))}${c.role_type ? ` · ${escapeHtml(c.role_type)}` : ""}</span>
-            </div>
-            <div style="font-size:13.5px;"><strong>性格底色：</strong>${escapeHtml(c.traits)}</div>
-            ${c.speech_style ? `<div style="font-size:13px; color:var(--ink-secondary);"><strong>说话习惯：</strong>${escapeHtml(c.speech_style)}</div>` : ""}
-            ${c.catchphrases ? `<div style="font-size:13px; color:var(--jade);"><strong>常挂嘴边：</strong>${escapeHtml(c.catchphrases)}</div>` : ""}
-            ${c.forbidden_words ? `<div style="font-size:13px; color:var(--crimson);"><strong>绝对忌口：</strong>${escapeHtml(c.forbidden_words)}</div>` : ""}
-            ${samples.length ? `<div class="snippet-quote" style="font-size:13px;">${samples.map((l) => escapeHtml(l)).join("\n")}</div>` : ""}
-          </div>
-        `;
-      })
-      .join("");
-  }
-
-  async function loadHighlights() {
-    const gid = $("kb-genre-filter").value;
-    const params = new URLSearchParams();
-    if (gid) params.set("genre_id", gid);
-    const data = await api(`/api/highlights?${params.toString()}`);
-    const items = data.items || [];
-    const list = $("highlights-list");
-
-    if (!items.length) {
-      list.innerHTML = `<div class="empty-state" style="grid-column:1/-1;">暂无名场面钩子卡，点击右上角「＋ 记一个名场面」沉淀高潮反转套路。</div>`;
-      return;
-    }
-
-    list.innerHTML = items
-      .map(
-        (h) => `
-          <div class="snippet-card">
-            <div style="display:flex; justify-content:space-between; align-items:center;">
-              <span class="pill-badge plum">${escapeHtml(h.hook_type || "名场面钩子")}</span>
-              <span class="pill-badge">${escapeHtml(genreNameById(h.genre_id))}${h.chapter_range ? ` · ${escapeHtml(h.chapter_range)}` : ""}</span>
-            </div>
-            <div style="font-size:14px;">${escapeHtml(h.plain_summary)}</div>
-            ${h.why_it_hooks ? `<div style="font-size:12.5px; color:var(--ink-secondary);">抓人原因：${escapeHtml(h.why_it_hooks)}</div>` : ""}
-            ${h.raw_excerpt ? `<div class="snippet-quote" style="font-size:13px;">${escapeHtml(h.raw_excerpt)}</div>` : ""}
-          </div>
-        `
-      )
-      .join("");
-  }
-
-  // ---------- Tab 3: Jinghua Lock ----------
-  async function loadJinghuaRules() {
-    const data = await api("/api/jinghua/rules?include_disabled=true");
-    const items = data.items || [];
-    const list = $("jinghua-rules-list");
-
-    if (!items.length) {
-      list.innerHTML = `<div class="empty-state">暂无黑名单规则。</div>`;
-      return;
-    }
-
-    list.innerHTML = items
-      .map((r) => {
-        const enabled = Boolean(r.enabled);
-        return `
-          <div class="rule-item ${enabled ? "" : "disabled"}">
-            <div style="flex:1;">
-              <div style="display:flex; align-items:center; gap:6px; flex-wrap:wrap; margin-bottom:4px;">
-                <strong style="color:var(--crimson); font-size:14.5px;">${escapeHtml(r.bad_pattern)}</strong>
-                <span class="pill-badge">${escapeHtml(r.category)}</span>
-                <span class="pill-badge ${enabled ? "jade" : ""}">${enabled ? "拦截中" : "已暂停"}</span>
-                ${r.hit_count ? `<span style="font-size:11.5px; color:var(--ink-muted);">已拦截 ${r.hit_count} 次</span>` : ""}
-              </div>
-              ${r.reason ? `<div style="font-size:12.5px; color:var(--ink-secondary);">原因：${escapeHtml(r.reason)}</div>` : ""}
-              ${r.good_replacement_example ? `<div style="font-size:12.5px; color:var(--jade);">平实改写：${escapeHtml(r.good_replacement_example)}</div>` : ""}
-            </div>
-            <div style="display:flex; gap:6px;">
-              <button type="button" class="btn btn-sm" data-toggle-rule="${escapeHtml(r.id)}" data-next-enabled="${enabled ? "0" : "1"}">${enabled ? "暂停" : "启用"}</button>
-              <button type="button" class="btn btn-sm btn-crimson" data-del-rule="${escapeHtml(r.id)}">删除</button>
-            </div>
-          </div>
-        `;
-      })
-      .join("");
-
-    list.querySelectorAll("[data-toggle-rule]").forEach((btn) => {
-      btn.addEventListener("click", async () => {
-        const rid = btn.dataset.toggleRule;
-        const nextEnabled = btn.dataset.nextEnabled === "1";
-        try {
-          await api(`/api/jinghua/rules/${encodeURIComponent(rid)}`, {
-            method: "PATCH",
-            body: JSON.stringify({ enabled: nextEnabled }),
-          });
-          await Promise.all([loadJinghuaRules(), loadDashboard()]);
-        } catch (err) {
-          toast(err.message, "error");
-        }
-      });
-    });
-
-    list.querySelectorAll("[data-del-rule]").forEach((btn) => {
-      btn.addEventListener("click", async () => {
-        const rid = btn.dataset.delRule;
-        try {
-          await api(`/api/jinghua/rules/${encodeURIComponent(rid)}`, { method: "DELETE" });
-          toast("已删除该规则", "success");
-          await Promise.all([loadJinghuaRules(), loadDashboard()]);
-        } catch (err) {
-          toast(err.message, "error");
-        }
-      });
-    });
-  }
-
-  function renderHighlightedOilyText(rawText, hits) {
-    const patterns = Array.from(
-      new Set(
-        (hits || [])
-          .map((h) => h.matched_text || h.pattern || h.bad_pattern || "")
-          .filter(Boolean)
-      )
-    ).sort((a, b) => b.length - a.length);
-
-    let html = escapeHtml(rawText);
-    for (const pat of patterns) {
-      const safePat = escapeHtml(pat).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-      if (!safePat) continue;
-      const re = new RegExp(safePat, "g");
-      html = html.replace(re, (m) => `<mark class="oily-mark">${m}</mark>`);
-    }
-    return html;
-  }
-
-  async function runJinghuaTester(text) {
-    const data = await api("/api/jinghua/check", {
-      method: "POST",
-      body: JSON.stringify({ text }),
-    });
-    const res = data.result || {};
-    $("jinghua-check-result").style.display = "block";
-
-    const score = Number(res.score ?? 100);
-    const passed = Boolean(res.passed);
-    const badge = $("jinghua-score-badge");
-    badge.textContent = `精话锁得分：${score} 分`;
-    badge.className = `pill-badge ${passed ? "jade" : "crimson"}`;
-    $("jinghua-pass-text").textContent = passed ? "通过！旁白干净平实" : `发现 ${(res.hits || []).length} 处AI油腻旁白，建议洗稿`;
-    $("jinghua-pass-text").style.color = passed ? "var(--jade)" : "var(--crimson)";
-
-    $("jinghua-highlight-preview").innerHTML = renderHighlightedOilyText(text, res.hits || []);
-    $("jinghua-rewrite-guide").value = res.rewrite_guide || "旁白保持干净克制，无需修改。";
-
-    const hits = res.hits || [];
-    $("jinghua-hits-list").innerHTML = hits.length
-      ? hits
-          .map((h) => {
-            const pat = h.pattern || h.bad_pattern || h.matched_text || "夸张旁白";
-            const ln = h.line_num ? `第 ${h.line_num} 行` : "";
-            const lineTxt = h.line_text || h.sentence || "";
-            const reason = h.reason || "";
-            const repl = h.good_replacement_example || h.suggestion || "";
-            return `
-              <div style="background:var(--crimson-soft); border:1px solid #ebb5be; border-radius:8px; padding:10px 12px; margin-bottom:8px; font-size:13px;">
-                <div><strong style="color:var(--crimson);">命中「${escapeHtml(pat)}」</strong> ${ln ? `<span class="pill-badge">${escapeHtml(ln)}</span>` : ""}</div>
-                ${lineTxt ? `<div style="margin-top:4px; color:var(--ink-main);">原句：${escapeHtml(lineTxt)}</div>` : ""}
-                ${reason ? `<div style="margin-top:3px; color:var(--ink-secondary);">问题：${escapeHtml(reason)}</div>` : ""}
-                ${repl ? `<div style="margin-top:3px; color:var(--jade); font-weight:600;">建议改为：${escapeHtml(repl)}</div>` : ""}
-              </div>
-            `;
-          })
-          .join("")
-      : `<div class="diagnostics-banner ok" style="margin-bottom:0;">未命中任何禁用油腻词，台词与动作描写很舒服！</div>`;
-  }
-
-  // ---------- Tab 4: Interactive Drama Graph ----------
-  async function loadProjects() {
-    const data = await api("/api/projects");
-    state.projects = data.items || [];
-    const sel = $("drama-project-select");
-    if (!state.projects.length) {
-      sel.innerHTML = `<option value="">暂无剧本，请先新建</option>`;
-      state.currentProjectId = "";
-      renderEmptyGraph();
-      return;
-    }
-
-    sel.innerHTML = state.projects
-      .map((p) => `<option value="${escapeHtml(p.id)}">${escapeHtml(p.title)}（${p.project_mode === "short_drama" ? "单线短剧" : "多支线互动"}）</option>`)
-      .join("");
-
-    if (!state.currentProjectId || !state.projects.some((p) => p.id === state.currentProjectId)) {
-      state.currentProjectId = state.projects[0].id;
-    }
-    sel.value = state.currentProjectId;
-    await loadProjectGraph(state.currentProjectId);
-  }
-
-  function renderEmptyGraph() {
-    $("drama-diagnostics-banner").className = "diagnostics-banner warn";
-    $("drama-diagnostics-banner").textContent = "还没有互动剧本，点击上方「＋ 新建互动剧本」开始创作。";
-    $("graph-nodes-layer").innerHTML = "";
-    $("graph-edges-layer").innerHTML = "";
-    $("graph-svg").querySelectorAll("path").forEach((p) => p.remove());
-  }
-
-  async function loadProjectGraph(projectId) {
-    if (!projectId) return;
-    const graph = await api(`/api/projects/${encodeURIComponent(projectId)}/graph`);
-    state.graph = graph;
-    renderDiagnosticsBanner(graph);
-    renderGraphCanvas();
-
-    const nodes = graph.nodes || [];
-    if (nodes.length) {
-      if (!state.selectedNodeId || !nodes.some((n) => n.id === state.selectedNodeId)) {
-        selectNode(nodes[0].id);
+        g.appendChild(dot);
       } else {
-        selectNode(state.selectedNodeId);
+        const ring = svgEl('circle', {
+          class: 'node-dot-hollow',
+          cx: -hw + 14,
+          cy: 0,
+          r: 3.4,
+        });
+        g.appendChild(ring);
       }
+
+      // 节点标题
+      const titleEl = svgEl('text', {
+        class: 'node-title',
+        x: -hw + 24,
+        y: 0.5,
+      });
+      titleEl.textContent = node.title;
+      g.appendChild(titleEl);
+
+      // 右侧精炼计数角标
+      if (node.badge) {
+        const badgeEl = svgEl('text', {
+          class: 'node-badge-text',
+          x: hw - 11,
+          y: 0.5,
+        });
+        badgeEl.textContent = node.badge;
+        g.appendChild(badgeEl);
+      }
+
+      // 待试菜 / 待补提醒微光点
+      if (node.pendingCount > 0) {
+        const pip = svgEl('circle', {
+          class: 'node-pending-pip',
+          cx: hw - 4,
+          cy: -hh + 4,
+          r: 3.2,
+        });
+        g.appendChild(pip);
+      }
+
+      // 拖拽文件悬停提示气泡（默认隐藏）
+      const tipG = svgEl('g', { class: 'node-drop-tip hidden', transform: `translate(0, ${-hh - 18})` });
+      const tipLabel = `松手喂入【${node.fullTitle || node.title}】`;
+      const tipW = Math.max(116, tipLabel.length * 11 + 18);
+      const tipBg = svgEl('rect', { class: 'node-drop-tip-bg', x: -tipW / 2, y: -11, width: tipW, height: 22 });
+      const tipTx = svgEl('text', { class: 'node-drop-tip-text', x: 0, y: 0.5 });
+      tipTx.textContent = tipLabel;
+      tipG.appendChild(tipBg);
+      tipG.appendChild(tipTx);
+      g.appendChild(tipG);
+
+      bindNodeInteractions(g, node);
+      layerNodes.appendChild(g);
+      nodeDomMap.set(node.id, g);
+    }
+
+    refreshHighlightClasses();
+    updateEdgePositions();
+  }
+
+  function computeBezier(a, b, edge) {
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const vertical = Math.abs(dy) >= Math.abs(dx) * 0.45;
+
+    let sx, sy, ex, ey, c1x, c1y, c2x, c2y;
+    if (vertical) {
+      const sign = dy >= 0 ? 1 : -1;
+      sx = a.x;
+      sy = a.y + sign * (a.height / 2 + 1);
+      ex = b.x;
+      ey = b.y - sign * (b.height / 2 + 4);
+      const spanY = Math.max(36, Math.abs(ey - sy) * 0.52);
+      const bias = edge.curveBias || 0;
+      c1x = sx + bias;
+      c1y = sy + sign * spanY;
+      c2x = ex - bias * 0.5;
+      c2y = ey - sign * spanY;
     } else {
-      clearNodeEditor();
+      const sign = dx >= 0 ? 1 : -1;
+      sx = a.x + sign * (a.width / 2 + 1);
+      sy = a.y;
+      ex = b.x - sign * (b.width / 2 + 4);
+      ey = b.y;
+      const spanX = Math.max(40, Math.abs(ex - sx) * 0.5);
+      c1x = sx + sign * spanX;
+      c1y = sy + (edge.curveBias || 0);
+      c2x = ex - sign * spanX;
+      c2y = ey - (edge.curveBias || 0) * 0.4;
+    }
+
+    const d = `M ${sx.toFixed(1)} ${sy.toFixed(1)} C ${c1x.toFixed(1)} ${c1y.toFixed(1)}, ${c2x.toFixed(1)} ${c2y.toFixed(1)}, ${ex.toFixed(1)} ${ey.toFixed(1)}`;
+    // t=0.5 的三次贝塞尔中点
+    const mx = 0.125 * sx + 0.375 * c1x + 0.375 * c2x + 0.125 * ex;
+    const my = 0.125 * sy + 0.375 * c1y + 0.375 * c2y + 0.125 * ey;
+    return { d, mx, my };
+  }
+
+  function updateEdgePositions() {
+    for (const item of edgeDomMap.values()) {
+      const a = simNodes.get(item.edge.from);
+      const b = simNodes.get(item.edge.to);
+      if (!a || !b) continue;
+      const { d, mx, my } = computeBezier(a, b, item.edge);
+      item.path.setAttribute('d', d);
+      item.hit.setAttribute('d', d);
+
+      if (item.badgeBg && item.badgeText) {
+        if (item.edge.choiceLabel) {
+          const bw = Math.max(54, item.edge.choiceLabel.length * 10.5 + 14);
+          item.badgeBg.setAttribute('x', (mx - bw / 2).toFixed(1));
+          item.badgeBg.setAttribute('y', (my - 9).toFixed(1));
+          item.badgeBg.setAttribute('width', bw.toFixed(1));
+          item.badgeText.setAttribute('x', mx.toFixed(1));
+          item.badgeText.setAttribute('y', my.toFixed(1));
+        } else {
+          const bw = Math.max(16, (item.edge.weightLabel || '').length * 7 + 8);
+          item.badgeBg.setAttribute('x', (mx - bw / 2).toFixed(1));
+          item.badgeBg.setAttribute('y', (my - 7).toFixed(1));
+          item.badgeBg.setAttribute('width', bw.toFixed(1));
+          item.badgeText.setAttribute('x', mx.toFixed(1));
+          item.badgeText.setAttribute('y', my.toFixed(1));
+        }
+      }
     }
   }
 
-  function renderDiagnosticsBanner(graph) {
-    const d = graph.diagnostics || {};
-    const nodes = graph.nodes || [];
-    const deadEnds = d.dead_end_nodes || d.dead_ends || [];
-    const unreachable = d.unreachable_nodes || d.unreachable || [];
-    const endingsCount =
-      d.endings?.total ??
-      d.ending_count ??
-      d.endings_count ??
-      nodes.filter((n) => String(n.node_type || "").endsWith("_ending")).length;
-    const avgScore = d.avg_jinghua_score ?? 100;
+  function startPhysicsLoop() {
+    if (rafId !== null) return;
+    const step = () => {
+      let moving = false;
+      for (const node of simNodes.values()) {
+        if (node.isDragging) continue;
+        const dx = node.tx - node.x;
+        const dy = node.ty - node.y;
+        if (Math.abs(dx) > 0.25 || Math.abs(dy) > 0.25 || Math.abs(node.vx) > 0.05 || Math.abs(node.vy) > 0.05) {
+          node.vx = (node.vx + dx * 0.17) * 0.72;
+          node.vy = (node.vy + dy * 0.17) * 0.72;
+          node.x += node.vx;
+          node.y += node.vy;
+          moving = true;
+          const g = nodeDomMap.get(node.id);
+          if (g) g.setAttribute('transform', `translate(${node.x.toFixed(1)}, ${node.y.toFixed(1)})`);
+        } else if (node.x !== node.tx || node.y !== node.ty) {
+          node.x = node.tx;
+          node.y = node.ty;
+          node.vx = 0;
+          node.vy = 0;
+          const g = nodeDomMap.get(node.id);
+          if (g) g.setAttribute('transform', `translate(${node.x.toFixed(1)}, ${node.y.toFixed(1)})`);
+        }
+      }
 
-    const hasProblem = deadEnds.length > 0 || unreachable.length > 0 || endingsCount === 0;
-    const banner = $("drama-diagnostics-banner");
-    banner.className = `diagnostics-banner ${hasProblem ? "warn" : "ok"}`;
+      if (moving) {
+        updateEdgePositions();
+        rafId = requestAnimationFrame(step);
+      } else {
+        updateEdgePositions();
+        rafId = null;
+      }
+    };
+    rafId = requestAnimationFrame(step);
+  }
 
-    const issues = [];
-    if (deadEnds.length) {
-      const names = deadEnds.map((x) => (typeof x === "object" ? `${x.node_code || ""} ${x.title || ""}` : x)).join("、");
-      issues.push(`发现 ${deadEnds.length} 个断头死胡同（非结局但没接后续选项）：${names}`);
-    }
-    if (unreachable.length) {
-      const names = unreachable.map((x) => (typeof x === "object" ? `${x.node_code || ""} ${x.title || ""}` : x)).join("、");
-      issues.push(`发现 ${unreachable.length} 个孤立不可达场次：${names}`);
-    }
-    if (endingsCount === 0 && nodes.length > 0) {
-      issues.push("还没有设置任何结局场次（好结局/坏结局/隐藏结局）");
+  // -------------------------------------------------------------------------
+  // 悬停聚光灯（上下游血脉高亮 + 流动微光粒子）
+  // -------------------------------------------------------------------------
+  function getLineageSet(startId) {
+    const activeNodes = new Set([startId]);
+    const activeEdges = new Set();
+
+    // 向上游溯源
+    const upQueue = [startId];
+    const upSeen = new Set([startId]);
+    while (upQueue.length) {
+      const cur = upQueue.shift();
+      for (const e of simEdges) {
+        if (e.to === cur) {
+          activeEdges.add(e.id);
+          if (!upSeen.has(e.from)) {
+            upSeen.add(e.from);
+            activeNodes.add(e.from);
+            upQueue.push(e.from);
+          }
+        }
+      }
     }
 
-    const summary = `全剧共 ${nodes.length} 场戏 · ${(graph.choices || []).length} 条分支选项 · ${endingsCount} 个结局 · 精话锁均分 ${avgScore}`;
-    banner.innerHTML = `
-      <span>${hasProblem ? `⚠️ 结构提醒：${escapeHtml(issues.join("；"))}` : "✅ 结构体检健康：所有支线畅通，无断头死胡同！"}</span>
-      <span style="font-weight:500;">${escapeHtml(summary)}</span>
+    // 向下游追踪
+    const downQueue = [startId];
+    const downSeen = new Set([startId]);
+    while (downQueue.length) {
+      const cur = downQueue.shift();
+      for (const e of simEdges) {
+        if (e.from === cur) {
+          activeEdges.add(e.id);
+          if (!downSeen.has(e.to)) {
+            downSeen.add(e.to);
+            activeNodes.add(e.to);
+            downQueue.push(e.to);
+          }
+        }
+      }
+    }
+
+    return { activeNodes, activeEdges };
+  }
+
+  function refreshHighlightClasses() {
+    const hoverId = state.hoveredNodeId;
+    const hasSearch = state.searchQuery.trim().length > 0;
+    const lineage = hoverId ? getLineageSet(hoverId) : null;
+
+    for (const [id, g] of nodeDomMap.entries()) {
+      const node = simNodes.get(id);
+      const isSelected = state.selectedNodeId === id;
+      g.classList.toggle('is-selected', isSelected);
+      g.classList.toggle('is-search-hit', Boolean(node?.searchHit));
+
+      const halo = g.querySelector('.node-halo');
+      if (halo) {
+        halo.setAttribute('display', node?.hasHalo || isSelected ? 'block' : 'none');
+        halo.classList.toggle('halo-selected', isSelected && !node?.haloKind);
+      }
+
+      let dimmed = false;
+      if (lineage && !lineage.activeNodes.has(id)) {
+        dimmed = true;
+      } else if (!lineage && hasSearch && !node?.searchHit) {
+        dimmed = true;
+      }
+      g.classList.toggle('is-dimmed', dimmed);
+    }
+
+    for (const [eid, item] of edgeDomMap.entries()) {
+      const active = lineage ? lineage.activeEdges.has(eid) : false;
+      item.group.classList.toggle('is-dimmed', Boolean(lineage && !active));
+      item.path.classList.toggle('is-highlight', active);
+      if (active) {
+        item.path.setAttribute('marker-end', 'url(#arrow-active)');
+      } else {
+        const m = item.edge.isGood ? 'url(#arrow-good)' : item.edge.isBad ? 'url(#arrow-bad)' : 'url(#arrow-muted)';
+        item.path.setAttribute('marker-end', m);
+      }
+    }
+
+    syncFlowParticles(lineage ? lineage.activeEdges : null);
+  }
+
+  function syncFlowParticles(activeEdgeIds) {
+    layerParticles.innerHTML = '';
+    activeParticles = [];
+    if (particleRafId !== null) {
+      cancelAnimationFrame(particleRafId);
+      particleRafId = null;
+    }
+    if (!activeEdgeIds || activeEdgeIds.size === 0) return;
+
+    for (const eid of activeEdgeIds) {
+      const dom = edgeDomMap.get(eid);
+      if (!dom) continue;
+      for (let i = 0; i < 2; i++) {
+        const c = svgEl('circle', { class: 'flow-particle', r: 2.3 });
+        layerParticles.appendChild(c);
+        activeParticles.push({ path: dom.path, t: i * 0.5, speed: 0.014, el: c });
+      }
+    }
+
+    const tick = () => {
+      if (!activeParticles.length) {
+        particleRafId = null;
+        return;
+      }
+      for (const p of activeParticles) {
+        p.t = (p.t + p.speed) % 1;
+        try {
+          const len = p.path.getTotalLength();
+          if (len > 1) {
+            const pt = p.path.getPointAtLength(p.t * len);
+            p.el.setAttribute('cx', pt.x.toFixed(1));
+            p.el.setAttribute('cy', pt.y.toFixed(1));
+          }
+        } catch { /* ignore detached path */ }
+      }
+      particleRafId = requestAnimationFrame(tick);
+    };
+    particleRafId = requestAnimationFrame(tick);
+  }
+
+  // -------------------------------------------------------------------------
+  // 节点交互：点击选中 / 拖拽物理手感 / 悬停聚光灯
+  // -------------------------------------------------------------------------
+  function bindNodeInteractions(g, node) {
+    g.addEventListener('mouseenter', () => {
+      state.hoveredNodeId = node.id;
+      refreshHighlightClasses();
+    });
+
+    g.addEventListener('mouseleave', () => {
+      if (state.hoveredNodeId === node.id) {
+        state.hoveredNodeId = null;
+        refreshHighlightClasses();
+      }
+    });
+
+    g.addEventListener('mousedown', (ev) => {
+      if (ev.button !== 0) return;
+      ev.stopPropagation();
+
+      const startClientX = ev.clientX;
+      const startClientY = ev.clientY;
+      const startNodeX = node.x;
+      const startNodeY = node.y;
+      let moved = false;
+
+      const onMove = (mev) => {
+        const dx = (mev.clientX - startClientX) / state.view.scale;
+        const dy = (mev.clientY - startClientY) / state.view.scale;
+        if (!moved && Math.hypot(mev.clientX - startClientX, mev.clientY - startClientY) > 4) {
+          moved = true;
+          node.isDragging = true;
+          g.classList.add('is-dragging');
+        }
+        if (moved) {
+          node.x = startNodeX + dx;
+          node.y = startNodeY + dy;
+          node.tx = node.x;
+          node.ty = node.y;
+          node.pinned = true;
+          g.setAttribute('transform', `translate(${node.x.toFixed(1)}, ${node.y.toFixed(1)})`);
+          updateEdgePositions();
+        }
+      };
+
+      const onUp = () => {
+        window.removeEventListener('mousemove', onMove);
+        window.removeEventListener('mouseup', onUp);
+        if (moved) {
+          node.isDragging = false;
+          g.classList.remove('is-dragging');
+          // 在知识星图模式释放后轻微回弹归位（或保持位置），在互动支线模式持久化坐标
+          if (state.mode === 'branching' && node.storyNodeId) {
+            const px = Math.round(node.x / 1.45);
+            const py = Math.round(node.y / 1.25);
+            api(`/api/nodes/${node.storyNodeId}/position`, {
+              method: 'PATCH',
+              body: { pos_x: px, pos_y: py },
+            }).catch(() => {});
+          } else {
+            // 释放时微幅物理阻尼回弹感
+            node.vx = (node.tx - node.x) * 0.08;
+            node.vy = (node.ty - node.y) * 0.08;
+          }
+        } else {
+          handleNodeClick(node);
+        }
+      };
+
+      window.addEventListener('mousemove', onMove);
+      window.addEventListener('mouseup', onUp);
+    });
+  }
+
+  async function handleNodeClick(node) {
+    state.selectedNodeId = node.id;
+    refreshHighlightClasses();
+
+    if (node.kind === 'root') {
+      await openRootDrawer();
+      return;
+    }
+
+    if (node.kind === 'channel') {
+      // 点击三大主干：平滑展开/收起其子标签
+      if (state.expandedChannels.has(node.channelName)) {
+        state.expandedChannels.delete(node.channelName);
+      } else {
+        state.expandedChannels.add(node.channelName);
+      }
+      computeUniverseLayout();
+      return;
+    }
+
+    if (node.kind === 'tag') {
+      // 若旗下有书，平滑向下长出《书名》节点，同时滑出右侧极简抽屉
+      if (state.expandedTagIds.has(node.genreId)) {
+        state.expandedTagIds.delete(node.genreId);
+      } else {
+        state.expandedTagIds.add(node.genreId);
+      }
+      computeUniverseLayout();
+      await openTagDrawer(node.raw);
+      return;
+    }
+
+    if (node.kind === 'work') {
+      await openWorkDrawer(node.workId);
+      return;
+    }
+
+    if (node.kind === 'branch_node') {
+      await openBranchNodeDrawer(node.raw);
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // 画布平移、滚轮定点缩放、双击居中对齐
+  // -------------------------------------------------------------------------
+  function applyViewportTransform() {
+    viewportEl.setAttribute(
+      'transform',
+      `translate(${state.view.x.toFixed(1)}, ${state.view.y.toFixed(1)}) scale(${state.view.scale.toFixed(4)})`
+    );
+    $('#zoom-pct').textContent = `${Math.round(state.view.scale * 100)}%`;
+  }
+
+  function fitToScreen() {
+    if (simNodes.size === 0) {
+      state.view = { x: window.innerWidth / 2, y: 120, scale: 1 };
+      applyViewportTransform();
+      return;
+    }
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    for (const n of simNodes.values()) {
+      n.pinned = false;
+      minX = Math.min(minX, n.tx - n.width / 2);
+      maxX = Math.max(maxX, n.tx + n.width / 2);
+      minY = Math.min(minY, n.ty - n.height / 2);
+      maxY = Math.max(maxY, n.ty + n.height / 2);
+    }
+    const padX = 70;
+    const padTop = 78;
+    const padBottom = 52;
+    const w = Math.max(200, maxX - minX);
+    const h = Math.max(160, maxY - minY);
+    const availW = Math.max(300, window.innerWidth - padX * 2);
+    const availH = Math.max(240, window.innerHeight - padTop - padBottom);
+    const scale = Math.max(0.38, Math.min(1.12, Math.min(availW / w, availH / h)));
+
+    const cx = (minX + maxX) / 2;
+    const cy = (minY + maxY) / 2;
+    state.view.scale = scale;
+    state.view.x = window.innerWidth / 2 - cx * scale;
+    state.view.y = padTop + availH / 2 - cy * scale;
+    applyViewportTransform();
+
+    if (state.mode === 'universe') computeUniverseLayout();
+  }
+
+  function initStageControls() {
+    const stage = $('#canvas-stage');
+
+    stage.addEventListener('mousedown', (ev) => {
+      if (ev.button !== 0) return;
+      const sx = ev.clientX;
+      const sy = ev.clientY;
+      const vx0 = state.view.x;
+      const vy0 = state.view.y;
+      let panned = false;
+
+      const onMove = (mev) => {
+        const dx = mev.clientX - sx;
+        const dy = mev.clientY - sy;
+        if (!panned && Math.hypot(dx, dy) > 4) {
+          panned = true;
+          stage.classList.add('is-panning');
+        }
+        if (panned) {
+          state.view.x = vx0 + dx;
+          state.view.y = vy0 + dy;
+          applyViewportTransform();
+        }
+      };
+
+      const onUp = () => {
+        window.removeEventListener('mousemove', onMove);
+        window.removeEventListener('mouseup', onUp);
+        stage.classList.remove('is-panning');
+        if (!panned) {
+          // 点空白收起抽屉与浮层
+          closeDrawer();
+          hidePopovers();
+          state.selectedNodeId = null;
+          refreshHighlightClasses();
+        }
+      };
+
+      window.addEventListener('mousemove', onMove);
+      window.addEventListener('mouseup', onUp);
+    });
+
+    stage.addEventListener('wheel', (ev) => {
+      ev.preventDefault();
+      const factor = ev.deltaY < 0 ? 1.1 : 0.91;
+      const nextScale = Math.max(0.28, Math.min(2.4, state.view.scale * factor));
+      const rect = stage.getBoundingClientRect();
+      const mx = ev.clientX - rect.left;
+      const my = ev.clientY - rect.top;
+
+      const wx = (mx - state.view.x) / state.view.scale;
+      const wy = (my - state.view.y) / state.view.scale;
+
+      state.view.scale = nextScale;
+      state.view.x = mx - wx * nextScale;
+      state.view.y = my - wy * nextScale;
+      applyViewportTransform();
+    }, { passive: false });
+
+    stage.addEventListener('dblclick', (ev) => {
+      if (ev.target === stage || ev.target === svgElRoot) {
+        fitToScreen();
+      }
+    });
+
+    $('#btn-fit-view').addEventListener('click', fitToScreen);
+  }
+
+  // -------------------------------------------------------------------------
+  // 右侧滑出极简抽屉 (Slide-over Drawer, 400px)
+  // -------------------------------------------------------------------------
+  const drawerEl = $('#side-drawer');
+  const drawerBody = $('#drawer-body');
+
+  function openDrawerShell({ kicker, title, showFeedBtn = false, feedGenreId = null }) {
+    $('#drawer-kicker').innerHTML = kicker || '';
+    $('#drawer-title').textContent = title || '';
+    const feedBtn = $('#drawer-feed-here');
+    if (showFeedBtn && feedGenreId) {
+      feedBtn.classList.remove('hidden');
+      state.feedTargetGenreId = feedGenreId;
+    } else {
+      feedBtn.classList.add('hidden');
+    }
+    drawerEl.classList.add('open');
+    drawerEl.setAttribute('aria-hidden', 'false');
+  }
+
+  function closeDrawer() {
+    drawerEl.classList.remove('open');
+    drawerEl.setAttribute('aria-hidden', 'true');
+  }
+
+  function hidePopovers() {
+    $('#upload-tag-popover').classList.add('hidden');
+    $('#new-project-popover').classList.add('hidden');
+    $('#jinghua-panel').classList.add('hidden');
+    $('#btn-jinghua-lock').classList.remove('active');
+  }
+
+  // 原位展开原书段落核对（不叠弹窗套娃）
+  async function toggleInlineSpan(btn, workId, chapterNum, lineStart, lineEnd) {
+    const card = btn.closest('.glass-card');
+    const existing = card.querySelector('.inline-span-box');
+    if (existing) {
+      existing.remove();
+      return;
+    }
+    btn.textContent = '读取原文中...';
+    try {
+      const start = Math.max(1, (lineStart || 1) - 2);
+      const end = Math.max(start + 4, (lineEnd || lineStart || 1) + 3);
+      const data = await api(`/api/works/${workId}/span?chapter_num=${chapterNum || 1}&line_start=${start}&line_end=${end}`);
+      const span = data.span;
+      const box = document.createElement('div');
+      box.className = 'inline-span-box';
+      box.innerHTML = (span.lines || []).map((ln) => {
+        const focus = ln.line_num >= (lineStart || 0) && ln.line_num <= (lineEnd || 0);
+        return `<div class="inline-span-line ${focus ? 'is-focus' : ''}"><span class="inline-span-ln">L${ln.line_num}</span><span>${escHtml(ln.text)}</span></div>`;
+      }).join('');
+      card.appendChild(box);
+      btn.textContent = `第${chapterNum}章 L${lineStart || 1} ▴`;
+    } catch (err) {
+      btn.textContent = `原文回读失败`;
+      toast(err.message, 'err');
+    }
+  }
+
+  function renderSnippetCardHtml(sn, isPending) {
+    const hasRef = sn.work_id && sn.chapter_num != null;
+    const refLabel = hasRef ? `第${sn.chapter_num}章 L${sn.line_start || 1}` : '手工摘录';
+    return `
+      <div class="glass-card ${isPending ? 'is-pending-card' : ''}" data-snippet-id="${escHtml(sn.id)}">
+        <div class="quote-text">${escHtml(sn.raw_text)}</div>
+        ${sn.why_funny_or_effective ? `<div class="muted-text">${escHtml(sn.why_funny_or_effective)}</div>` : ''}
+        <div class="card-meta-row">
+          <span class="badge-pill">${escHtml(sn.scene_tag || (isPending ? '待试菜' : '好梗'))}</span>
+          ${hasRef
+            ? `<button class="span-link-btn" type="button" data-work-id="${escHtml(sn.work_id)}" data-ch="${sn.chapter_num}" data-ls="${sn.line_start || 1}" data-le="${sn.line_end || sn.line_start || 1}">${refLabel} · 核对原文</button>`
+            : `<span class="muted-text">${refLabel}</span>`}
+        </div>
+        ${isPending ? `
+          <div class="taste-btn-row">
+            <button class="btn-taste-yes" type="button" data-action="approve">✓ 对味留用</button>
+            <button class="btn-taste-no" type="button" data-action="reject">✗ 淘汰</button>
+          </div>` : ''}
+      </div>
     `;
   }
 
-  function renderGraphCanvas() {
-    const nodes = state.graph.nodes || [];
-    const choices = state.graph.choices || [];
-    const nodesLayer = $("graph-nodes-layer");
-    const edgesLayer = $("graph-edges-layer");
-    const svg = $("graph-svg");
+  function bindDrawerSnippetEvents(container, onReviewed) {
+    container.addEventListener('click', async (ev) => {
+      const spanBtn = ev.target.closest('.span-link-btn');
+      if (spanBtn) {
+        await toggleInlineSpan(
+          spanBtn,
+          spanBtn.dataset.workId,
+          Number(spanBtn.dataset.ch),
+          Number(spanBtn.dataset.ls),
+          Number(spanBtn.dataset.le)
+        );
+        return;
+      }
 
-    svg.querySelectorAll("path").forEach((p) => p.remove());
-    edgesLayer.innerHTML = "";
-    nodesLayer.innerHTML = "";
-
-    const nodeMap = new Map(nodes.map((n) => [n.id, n]));
-    const NODE_W = 210;
-    const NODE_H = 100;
-
-    // Group edges sharing same (from, to) to slightly offset curved paths
-    const pairCounts = new Map();
-    choices.forEach((c) => {
-      const key = `${c.from_node_id}->${c.to_node_id}`;
-      pairCounts.set(key, (pairCounts.get(key) || 0) + 1);
+      const tasteBtn = ev.target.closest('.btn-taste-yes, .btn-taste-no');
+      if (tasteBtn) {
+        const card = tasteBtn.closest('.glass-card');
+        const sid = card.dataset.snippetId;
+        const status = tasteBtn.dataset.action === 'approve' ? 'approved' : 'rejected';
+        tasteBtn.disabled = true;
+        try {
+          await api(`/api/snippets/${sid}/review`, {
+            method: 'POST',
+            body: { status, rating: status === 'approved' ? 5 : 1 },
+          });
+          card.classList.add('is-leaving');
+          setTimeout(() => card.remove(), 240);
+          toast(status === 'approved' ? '已收入好梗库' : '已淘汰该片段', 'ok');
+          await loadUniverse(false);
+          if (onReviewed) onReviewed();
+        } catch (err) {
+          tasteBtn.disabled = false;
+          toast(err.message, 'err');
+        }
+      }
     });
-    const pairIdx = new Map();
+  }
 
-    for (const c of choices) {
-      const from = nodeMap.get(c.from_node_id);
-      const to = nodeMap.get(c.to_node_id);
-      if (!from || !to) continue;
+  async function openRootDrawer() {
+    openDrawerShell({
+      kicker: '<span class="badge-pill">编剧总库</span><span class="badge-pill">三频星图总览</span>',
+      title: '编剧灵感星图 · 总库',
+    });
+    drawerBody.innerHTML = '<div class="muted-text">正在读取总库待试菜与好梗...</div>';
+    try {
+      const [pendingRes, approvedRes] = await Promise.all([
+        api('/api/snippets?status=pending&limit=20'),
+        api('/api/snippets?status=approved&limit=12'),
+      ]);
+      const pending = pendingRes.items || [];
+      const approved = approvedRes.items || [];
+      const r = state.universe.root || {};
 
-      const key = `${c.from_node_id}->${c.to_node_id}`;
-      const idx = pairIdx.get(key) || 0;
-      pairIdx.set(key, idx + 1);
-      const totalSame = pairCounts.get(key) || 1;
-      const offset = (idx - (totalSame - 1) / 2) * 34;
-
-      const x1 = Number(from.pos_x || 120) + NODE_W / 2;
-      const y1 = Number(from.pos_y || 120) + NODE_H / 2;
-      const x2 = Number(to.pos_x || 120) + NODE_W / 2;
-      const y2 = Number(to.pos_y || 120) + NODE_H / 2;
-
-      const mx = (x1 + x2) / 2;
-      const my = (y1 + y2) / 2;
-      const dx = x2 - x1;
-      const dy = y2 - y1;
-      const len = Math.hypot(dx, dy) || 1;
-      const nx = -dy / len;
-      const ny = dx / len;
-      const cx = mx + nx * (26 + offset);
-      const cy = my + ny * (26 + offset);
-
-      // End arrow near target card edge
-      const tx = x2 - (dx / len) * 65;
-      const ty = y2 - (dy / len) * 45;
-
-      const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
-      path.setAttribute("d", `M ${x1} ${y1} Q ${cx} ${cy} ${tx} ${ty}`);
-      path.setAttribute("fill", "none");
-      path.setAttribute("stroke", "#677080");
-      path.setAttribute("stroke-width", "2.2");
-      path.setAttribute("marker-end", "url(#arrow-head)");
-      svg.appendChild(path);
-
-      // Midpoint on quadratic bezier t=0.5
-      const lx = 0.25 * x1 + 0.5 * cx + 0.25 * tx;
-      const ly = 0.25 * y1 + 0.5 * cy + 0.25 * ty;
-
-      const deltaText = formatDelta(c.state_delta);
-      const lbl = document.createElement("div");
-      lbl.className = "graph-edge-label";
-      lbl.style.left = `${lx}px`;
-      lbl.style.top = `${ly}px`;
-      lbl.innerHTML = `
-        <div style="font-weight:700; color:var(--ink-main);">${escapeHtml(c.choice_label)}</div>
-        ${c.choice_tag ? `<div style="color:var(--cobalt); font-size:11px;">${escapeHtml(c.choice_tag)}</div>` : ""}
-        ${deltaText ? `<div style="color:var(--jade); font-size:11px; font-weight:600;">${escapeHtml(deltaText)}</div>` : ""}
+      drawerBody.innerHTML = `
+        <div class="drawer-row-actions">
+          <span class="badge-pill">作品 ${r.total_works ?? state.universe.works.length} 本</span>
+          <span class="badge-pill badge-clean">好梗 ${r.approved_count ?? r.total_approved ?? approved.length} 条</span>
+          <span class="badge-pill badge-pending">待试菜 ${pending.length} 条</span>
+        </div>
+        ${pending.length ? `
+          <div class="drawer-section">
+            <div class="section-label-row"><span>待试菜新梗（置顶直审）</span><span>${pending.length}</span></div>
+            <div id="root-pending-list" class="drawer-section">${pending.map((s) => renderSnippetCardHtml(s, true)).join('')}</div>
+          </div>
+        ` : '<div class="empty-hint-box">暂无待试菜片段。把电脑上的 .txt / .docx 小说拖到任意标签胶囊上即可自动喂书提取。</div>'}
+        <div class="drawer-section">
+          <div class="section-label-row"><span>最新留用原话好梗</span><span>${approved.length}</span></div>
+          <div id="root-approved-list" class="drawer-section">
+            ${approved.length ? approved.map((s) => renderSnippetCardHtml(s, false)).join('') : '<div class="muted-text">尚未收入好梗</div>'}
+          </div>
+        </div>
       `;
-      lbl.addEventListener("click", () => openChoiceModal(c));
-      edgesLayer.appendChild(lbl);
+      bindDrawerSnippetEvents(drawerBody);
+    } catch (err) {
+      drawerBody.innerHTML = `<div class="empty-hint-box">${escHtml(err.message)}</div>`;
+    }
+  }
+
+  async function openTagDrawer(tag) {
+    const channelBadge = `<span class="badge-pill">${escHtml(tag.channel || '通用')}</span>`;
+    const platBadge = tag.platforms ? `<span class="badge-pill">${escHtml(tag.platforms)}</span>` : '';
+    openDrawerShell({
+      kicker: `${channelBadge}${platBadge}`,
+      title: tag.name,
+      showFeedBtn: true,
+      feedGenreId: tag.id,
+    });
+
+    drawerBody.innerHTML = '<div class="muted-text">加载标签素材中...</div>';
+    try {
+      const [pendingRes, approvedRes, charsRes, hlRes] = await Promise.all([
+        api(`/api/snippets?genre_id=${encodeURIComponent(tag.id)}&status=pending&limit=30`),
+        api(`/api/snippets?genre_id=${encodeURIComponent(tag.id)}&status=approved&limit=40`),
+        api(`/api/characters?genre_id=${encodeURIComponent(tag.id)}`),
+        api(`/api/highlights?genre_id=${encodeURIComponent(tag.id)}`),
+      ]);
+
+      const pending = pendingRes.items || [];
+      const approved = approvedRes.items || [];
+      const chars = charsRes.items || [];
+      const highlights = hlRes.items || [];
+      const tagWorks = (state.universe.works || []).filter((w) => w.genre_id === tag.id);
+
+      drawerBody.innerHTML = `
+        ${tag.description ? `<div class="drawer-desc">${escHtml(tag.description)}${tag.channel_hint ? ` · 对白风味：${escHtml(tag.channel_hint)}` : ''}</div>` : ''}
+
+        ${pending.length ? `
+          <div class="drawer-section">
+            <div class="section-label-row"><span>🔥 待试菜新梗</span><span class="badge-pill badge-pending">${pending.length} 待定</span></div>
+            <div class="drawer-section" id="tag-pending-list">${pending.map((s) => renderSnippetCardHtml(s, true)).join('')}</div>
+          </div>
+        ` : ''}
+
+        <div class="drawer-section">
+          <div class="section-label-row">
+            <span>原话好梗</span>
+            <span>${approved.length} 条</span>
+          </div>
+          <div class="drawer-section" id="tag-approved-list">
+            ${approved.length
+              ? approved.map((s) => renderSnippetCardHtml(s, false)).join('')
+              : `<div class="empty-hint-box">这个抽屉还是空的。<br/>把小说文件直接拖到【${escHtml(tag.name)}】胶囊上即可自动投喂！</div>`}
+          </div>
+        </div>
+
+        ${chars.length ? `
+          <div class="drawer-section">
+            <div class="section-label-row"><span>人物特点卡</span><span>${chars.length}</span></div>
+            ${chars.map((c) => `
+              <div class="glass-card">
+                <div class="card-meta-row">
+                  <strong>${escHtml(c.name)}</strong>
+                  ${c.role_type ? `<span class="badge-pill">${escHtml(c.role_type)}</span>` : ''}
+                </div>
+                <div class="drawer-desc">${escHtml(c.traits)}</div>
+                ${c.catchphrases ? `<div class="muted-text">口头禅：${escHtml(c.catchphrases)}</div>` : ''}
+              </div>
+            `).join('')}
+          </div>
+        ` : ''}
+
+        ${highlights.length ? `
+          <div class="drawer-section">
+            <div class="section-label-row"><span>名场面钩子</span><span>${highlights.length}</span></div>
+            ${highlights.map((h) => `
+              <div class="glass-card">
+                <div class="quote-text">${escHtml(h.plain_summary)}</div>
+                <div class="card-meta-row">
+                  ${h.hook_type ? `<span class="badge-pill">${escHtml(h.hook_type)}</span>` : ''}
+                  ${h.chapter_range ? `<span class="muted-text">${escHtml(h.chapter_range)}</span>` : ''}
+                </div>
+              </div>
+            `).join('')}
+          </div>
+        ` : ''}
+
+        ${tagWorks.length ? `
+          <div class="drawer-section">
+            <div class="section-label-row"><span>归属书籍（防盗隔离状态）</span><span>${tagWorks.length} 本</span></div>
+            ${tagWorks.map((w) => `
+              <div class="glass-card work-jump-card" data-work-id="${escHtml(w.id)}" style="cursor:pointer;">
+                <div class="card-meta-row">
+                  <strong>《${escHtml(w.title)}》</strong>
+                  <span class="badge-pill badge-clean">干净 ${w.clean_chapters ?? 0} 章</span>
+                </div>
+                ${(w.corrupted_chapters ?? 0) > 0
+                  ? `<div class="card-meta-row"><span class="badge-pill badge-corrupt">已隔离防盗乱码 ${w.corrupted_chapters} 章</span><span class="muted-text">点击查看</span></div>`
+                  : `<div class="muted-text">全本干净无防盗乱码 · 点击查看章节与摘要</div>`}
+              </div>
+            `).join('')}
+          </div>
+        ` : ''}
+      `;
+
+      bindDrawerSnippetEvents(drawerBody);
+      $$('.work-jump-card', drawerBody).forEach((el) => {
+        el.addEventListener('click', () => openWorkDrawer(el.dataset.workId));
+      });
+    } catch (err) {
+      drawerBody.innerHTML = `<div class="empty-hint-box">${escHtml(err.message)}</div>`;
+    }
+  }
+
+  async function openWorkDrawer(workId) {
+    openDrawerShell({
+      kicker: '<span class="badge-pill">作品档案</span>',
+      title: '读取作品中...',
+    });
+    try {
+      const [detailRes, pendingRes, approvedRes, charsRes] = await Promise.all([
+        api(`/api/works/${workId}`),
+        api(`/api/snippets?work_id=${encodeURIComponent(workId)}&status=pending&limit=20`),
+        api(`/api/snippets?work_id=${encodeURIComponent(workId)}&status=approved&limit=30`),
+        api(`/api/characters?work_id=${encodeURIComponent(workId)}`),
+      ]);
+      const w = detailRes.work;
+      const pending = pendingRes.items || [];
+      const approved = approvedRes.items || [];
+      const chars = charsRes.items || [];
+      const chapters = w.chapters || [];
+      const cleanCount = w.clean_chapters ?? chapters.filter((c) => !c.is_corrupted).length;
+      const corruptCount = w.corrupted_chapters ?? chapters.filter((c) => c.is_corrupted).length;
+
+      $('#drawer-title').textContent = `《${w.title}》`;
+      $('#drawer-kicker').innerHTML = `
+        <span class="badge-pill badge-clean">干净 ${cleanCount} 章</span>
+        ${corruptCount > 0 ? `<span class="badge-pill badge-corrupt">已隔离防盗乱码 ${corruptCount} 章</span>` : ''}
+      `;
+
+      drawerBody.innerHTML = `
+        ${w.summary_one_page ? `
+          <div class="glass-card">
+            <div class="section-label-row"><span>一页纸故事精简卡</span></div>
+            <div class="drawer-desc">${escHtml(w.summary_one_page)}</div>
+          </div>
+        ` : ''}
+
+        ${pending.length ? `
+          <div class="drawer-section">
+            <div class="section-label-row"><span>本书待试菜新梗</span><span class="badge-pill badge-pending">${pending.length}</span></div>
+            ${pending.map((s) => renderSnippetCardHtml(s, true)).join('')}
+          </div>
+        ` : ''}
+
+        <div class="drawer-section">
+          <div class="section-label-row"><span>本书原话好梗</span><span>${approved.length}</span></div>
+          ${approved.length
+            ? approved.map((s) => renderSnippetCardHtml(s, false)).join('')
+            : '<div class="muted-text">本书尚无已留用好梗，可在上方试菜确认</div>'}
+        </div>
+
+        ${chars.length ? `
+          <div class="drawer-section">
+            <div class="section-label-row"><span>本书人物特点</span><span>${chars.length}</span></div>
+            ${chars.map((c) => `
+              <div class="glass-card">
+                <strong>${escHtml(c.name)}</strong>
+                <div class="drawer-desc">${escHtml(c.traits)}</div>
+              </div>
+            `).join('')}
+          </div>
+        ` : ''}
+
+        <div class="drawer-section">
+          <div class="section-label-row"><span>章节清洗清单</span><span>共 ${chapters.length} 章</span></div>
+          ${chapters.slice(0, 60).map((ch) => `
+            <div class="glass-card">
+              <div class="card-meta-row">
+                <span>第 ${ch.chapter_num} 章 · ${escHtml(ch.chapter_title || '')}</span>
+                ${ch.is_corrupted
+                  ? `<span class="badge-pill badge-corrupt">防盗隔离</span>`
+                  : `<button class="span-link-btn" type="button" data-work-id="${escHtml(w.id)}" data-ch="${ch.chapter_num}" data-ls="1" data-le="18">看前18行</button>`}
+              </div>
+              ${ch.is_corrupted && ch.corruption_reason ? `<div class="muted-text">${escHtml(ch.corruption_reason)}</div>` : ''}
+            </div>
+          `).join('')}
+        </div>
+      `;
+
+      bindDrawerSnippetEvents(drawerBody);
+    } catch (err) {
+      drawerBody.innerHTML = `<div class="empty-hint-box">${escHtml(err.message)}</div>`;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // 互动支线节点抽屉（改台词 + 精话锁实时标红 + 一键 + 分支）
+  // -------------------------------------------------------------------------
+  async function openBranchNodeDrawer(node) {
+    const graph = state.branchGraph;
+    const outgoing = (graph?.choices || []).filter((c) => c.from_node_id === node.id);
+    const typeLabel = NODE_TYPE_LABELS[node.node_type] || node.node_type;
+
+    openDrawerShell({
+      kicker: `<span class="badge-pill">${escHtml(node.node_code || 'S')}</span><span class="badge-pill">${escHtml(typeLabel)}</span>`,
+      title: node.title,
+    });
+
+    drawerBody.innerHTML = `
+      <div class="drawer-section">
+        <div class="section-label-row"><span>场次标题 & 类型</span></div>
+        <input id="bn-title" class="dark-input" type="text" value="${escHtml(node.title)}" />
+        <div class="drawer-row-actions">
+          <select id="bn-type" class="project-select" style="flex:1;">
+            ${Object.entries(NODE_TYPE_LABELS).map(([k, v]) =>
+              `<option value="${k}" ${node.node_type === k ? 'selected' : ''}>${v}</option>`
+            ).join('')}
+          </select>
+          <input id="bn-speaker" class="dark-input" style="flex:1;" type="text" placeholder="出场人物" value="${escHtml(node.speaker_summary || '')}" />
+        </div>
+      </div>
+
+      <div class="drawer-section">
+        <div class="section-label-row"><span>台词与动作剧本</span></div>
+        <textarea id="bn-script" class="dark-textarea" rows="7" placeholder="写下这一幕的对话与简练动作...">${escHtml(node.script_text || '')}</textarea>
+        <div class="drawer-row-actions">
+          <button id="bn-save" class="pill-btn-primary" type="button">保存场次</button>
+          <button id="bn-jinghua" class="mini-pill-btn" type="button">🔒 精话锁标红</button>
+          <button id="bn-delete" class="pill-btn-danger" type="button">删节点</button>
+        </div>
+        <div id="bn-jinghua-preview" class="jinghua-result-box hidden"></div>
+      </div>
+
+      <div class="drawer-section">
+        <div class="section-label-row"><span>玩家分支选项 (${outgoing.length})</span></div>
+        <div id="bn-choices-list" class="drawer-section">
+          ${outgoing.length ? outgoing.map((ch) => {
+            const target = (graph.nodes || []).find((n) => n.id === ch.to_node_id);
+            return `
+              <div class="branch-item-card">
+                <div style="min-width:0;">
+                  <div style="font-size:12px;color:#e2e8f0;">${escHtml(ch.choice_label)}</div>
+                  <div class="muted-text">→ ${escHtml(target ? `${target.node_code} ${target.title}` : ch.to_node_id)}</div>
+                </div>
+                <button class="rule-chip-del bn-del-choice" type="button" data-choice-id="${escHtml(ch.id)}" title="删除连线">×</button>
+              </div>
+            `;
+          }).join('') : '<div class="muted-text">当前为断头节点，点下方直接长出下一幕分支</div>'}
+        </div>
+
+        <div class="glass-card">
+          <div class="section-label-row"><span>+ 分支（直接长出下一幕）</span></div>
+          <input id="bn-new-choice-label" class="dark-input" type="text" placeholder="玩家选项（如：A. 嘴硬反呛 [好感-5]）" />
+          <input id="bn-new-next-title" class="dark-input" type="text" placeholder="下一幕标题（如：反呛激怒反派）" />
+          <div class="drawer-row-actions">
+            <select id="bn-new-next-type" class="project-select" style="flex:1;">
+              <option value="scene">普通剧情</option>
+              <option value="climax">高潮反转</option>
+              <option value="good_ending">好结局</option>
+              <option value="bad_ending">坏结局</option>
+              <option value="hidden_ending">隐藏结局</option>
+            </select>
+            <button id="bn-add-branch" class="pill-btn-primary" type="button">+ 分支</button>
+          </div>
+        </div>
+      </div>
+    `;
+
+    $('#bn-save').addEventListener('click', async () => {
+      try {
+        await api(`/api/nodes/${node.id}`, {
+          method: 'PUT',
+          body: {
+            project_id: node.project_id,
+            title: $('#bn-title').value.trim() || node.title,
+            node_code: node.node_code,
+            episode_num: node.episode_num || 1,
+            node_type: $('#bn-type').value,
+            speaker_summary: $('#bn-speaker').value.trim(),
+            script_text: $('#bn-script').value,
+            camera_or_acting_cue: node.camera_or_acting_cue || '',
+            pos_x: node.pos_x,
+            pos_y: node.pos_y,
+          },
+        });
+        toast('场次剧本已保存', 'ok');
+        await loadBranchGraph(state.currentProjectId, false);
+      } catch (err) {
+        toast(err.message, 'err');
+      }
+    });
+
+    $('#bn-jinghua').addEventListener('click', async () => {
+      const txt = $('#bn-script').value.trim();
+      if (!txt) return toast('请先输入台词或正文再检测', 'err');
+      try {
+        const res = await api('/api/jinghua/check', { method: 'POST', body: { text: txt } });
+        const box = $('#bn-jinghua-preview');
+        box.classList.remove('hidden');
+        box.innerHTML = renderHighlightedJinghua(txt, res.result);
+      } catch (err) {
+        toast(err.message, 'err');
+      }
+    });
+
+    $('#bn-delete').addEventListener('click', async () => {
+      try {
+        await api(`/api/nodes/${node.id}`, { method: 'DELETE' });
+        closeDrawer();
+        toast('已删除场次节点', 'ok');
+        await loadBranchGraph(state.currentProjectId, false);
+      } catch (err) {
+        toast(err.message, 'err');
+      }
+    });
+
+    $$('.bn-del-choice', drawerBody).forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        try {
+          await api(`/api/choices/${btn.dataset.choiceId}`, { method: 'DELETE' });
+          toast('已断开分支连线', 'ok');
+          await loadBranchGraph(state.currentProjectId, false);
+          const refreshed = state.branchGraph?.nodes?.find((x) => x.id === node.id);
+          if (refreshed) openBranchNodeDrawer(refreshed);
+        } catch (err) {
+          toast(err.message, 'err');
+        }
+      });
+    });
+
+    $('#bn-add-branch').addEventListener('click', async () => {
+      const choiceLabel = $('#bn-new-choice-label').value.trim();
+      const nextTitle = $('#bn-new-next-title').value.trim();
+      if (!choiceLabel || !nextTitle) {
+        return toast('请填写选项文字与下一幕标题', 'err');
+      }
+      try {
+        const count = (state.branchGraph?.nodes?.length || 1) + 1;
+        const offsetX = (outgoing.length - 0.5) * 165;
+        const createdNodeRes = await api(`/api/projects/${state.currentProjectId}/nodes`, {
+          method: 'POST',
+          body: {
+            title: nextTitle,
+            node_code: `S${count}`,
+            node_type: $('#bn-new-next-type').value,
+            pos_x: (node.pos_x || 120) + offsetX,
+            pos_y: (node.pos_y || 120) + 125,
+          },
+        });
+        const newNode = createdNodeRes.item;
+        await api(`/api/projects/${state.currentProjectId}/choices`, {
+          method: 'POST',
+          body: {
+            from_node_id: node.id,
+            to_node_id: newNode.id,
+            choice_label: choiceLabel,
+            sort_order: outgoing.length,
+          },
+        });
+        toast('已长出新分支节点', 'ok');
+        await loadBranchGraph(state.currentProjectId, false);
+        const refreshed = state.branchGraph?.nodes?.find((x) => x.id === node.id);
+        if (refreshed) openBranchNodeDrawer(refreshed);
+      } catch (err) {
+        toast(err.message, 'err');
+      }
+    });
+  }
+
+  // -------------------------------------------------------------------------
+  // 精话锁标红渲染 & 浮层管理
+  // -------------------------------------------------------------------------
+  function renderHighlightedJinghua(text, result) {
+    const hits = result?.hits || [];
+    const patterns = Array.from(new Set(hits.map((h) => h.matched_text).filter(Boolean)));
+    let html = escHtml(text);
+    for (const pat of patterns) {
+      const safe = escHtml(pat).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      html = html.replace(new RegExp(safe, 'g'), `<span class="greasy-mark">${escHtml(pat)}</span>`);
+    }
+    html = html.replace(/\n/g, '<br/>');
+
+    if (hits.length === 0) {
+      return `<div>${html}</div><div class="rewrite-tips" style="color:#6ee7b7;">✓ 通过精话锁体检（${result.score ?? 100}分）：引号外旁白平实克制，未命中油腻词。</div>`;
     }
 
-    for (const n of nodes) {
-      const card = document.createElement("div");
-      const ntype = n.node_type || "scene";
-      card.className = `story-node-card type-${ntype} ${state.selectedNodeId === n.id ? "selected" : ""}`;
-      card.style.left = `${Number(n.pos_x || 120)}px`;
-      card.style.top = `${Number(n.pos_y || 120)}px`;
-      card.dataset.nodeId = n.id;
+    const tips = hits.slice(0, 5).map((h) =>
+      `<div>• <span class="greasy-mark">${escHtml(h.matched_text)}</span> → ${escHtml(h.good_replacement_example || h.reason || '改为平实具体动作')}</div>`
+    ).join('');
+    return `<div>${html}</div><div class="rewrite-tips">${tips}</div>`;
+  }
 
-      const score = Number(n.jinghua_score ?? 100);
-      card.innerHTML = `
-        <div class="node-top">
-          <span class="node-code">${escapeHtml(n.node_code || "S?")} · 第${n.episode_num || 1}集</span>
-          <span class="pill-badge" style="font-size:11px; padding:2px 6px;">${escapeHtml(nodeTypeLabel(ntype))}</span>
-        </div>
-        <div class="node-title">${escapeHtml(n.title)}</div>
-        <div class="node-meta">
-          ${n.speaker_summary ? escapeHtml(n.speaker_summary) : "点击右侧写台词"} · 精话 ${score}分
-        </div>
-      `;
+  async function loadJinghuaRules() {
+    try {
+      const res = await api('/api/jinghua/rules?include_disabled=true');
+      state.jinghuaRules = res.items || [];
+      const enabledCount = state.jinghuaRules.filter((r) => r.enabled).length;
+      $('#lock-rule-count').textContent = String(enabledCount);
+      $('#jinghua-rules-meta').textContent = `${enabledCount}/${state.jinghuaRules.length} 启用`;
 
-      // Drag & click handling
-      card.addEventListener("mousedown", (ev) => {
-        if (ev.button !== 0) return;
-        const startMouseX = ev.clientX;
-        const startMouseY = ev.clientY;
-        const origX = Number(n.pos_x || 120);
-        const origY = Number(n.pos_y || 120);
-        let moved = false;
+      const cloud = $('#jinghua-rules-cloud');
+      cloud.innerHTML = state.jinghuaRules.map((r) => `
+        <span class="rule-chip ${r.enabled ? '' : 'disabled'}" data-rule-id="${escHtml(r.id)}" data-enabled="${r.enabled ? '1' : '0'}" title="${escHtml(r.reason || '点击切换启停')}">
+          <span>${escHtml(r.bad_pattern)}</span>
+          <button class="rule-chip-del" type="button" data-del-id="${escHtml(r.id)}" title="移除禁词">×</button>
+        </span>
+      `).join('');
+    } catch (err) {
+      toast(`精话锁加载失败：${err.message}`, 'err');
+    }
+  }
 
-        function onMove(moveEv) {
-          const dx = moveEv.clientX - startMouseX;
-          const dy = moveEv.clientY - startMouseY;
-          if (Math.abs(dx) > 4 || Math.abs(dy) > 4) moved = true;
-          if (!moved) return;
-          const nx = Math.max(16, Math.round(origX + dx));
-          const ny = Math.max(16, Math.round(origY + dy));
-          n.pos_x = nx;
-          n.pos_y = ny;
-          card.style.left = `${nx}px`;
-          card.style.top = `${ny}px`;
-          // Fast redraw edges while dragging
-          redrawEdgesOnly(nodes, choices);
+  function initJinghuaPanel() {
+    const panel = $('#jinghua-panel');
+    const toggleBtn = $('#btn-jinghua-lock');
+
+    toggleBtn.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      const willOpen = panel.classList.contains('hidden');
+      hidePopovers();
+      if (willOpen) {
+        panel.classList.remove('hidden');
+        toggleBtn.classList.add('active');
+        loadJinghuaRules();
+      }
+    });
+
+    $('#jinghua-close').addEventListener('click', () => {
+      panel.classList.add('hidden');
+      toggleBtn.classList.remove('active');
+    });
+
+    $('#jinghua-run-btn').addEventListener('click', async () => {
+      const text = $('#jinghua-input').value.trim();
+      if (!text) return toast('请先粘贴需要检查的段落', 'err');
+      try {
+        const res = await api('/api/jinghua/check', { method: 'POST', body: { text } });
+        const r = res.result;
+        const badge = $('#jinghua-score-badge');
+        badge.classList.remove('hidden', 'pass', 'fail');
+        badge.classList.add(r.passed ? 'pass' : 'fail');
+        badge.textContent = r.passed ? `✓ ${r.score}分 · 干净` : `⚠ ${r.score}分 · 命中 ${r.hits.length} 处`;
+
+        const box = $('#jinghua-result-box');
+        box.classList.remove('hidden');
+        box.innerHTML = renderHighlightedJinghua(text, r);
+      } catch (err) {
+        toast(err.message, 'err');
+      }
+    });
+
+    $('#jinghua-rules-cloud').addEventListener('click', async (ev) => {
+      const delBtn = ev.target.closest('.rule-chip-del');
+      if (delBtn) {
+        ev.stopPropagation();
+        const rid = delBtn.dataset.delId;
+        try {
+          await api(`/api/jinghua/rules/${rid}`, { method: 'DELETE' });
+          await loadJinghuaRules();
+        } catch (err) {
+          toast(err.message, 'err');
         }
+        return;
+      }
 
-        async function onUp() {
-          window.removeEventListener("mousemove", onMove);
-          window.removeEventListener("mouseup", onUp);
-          if (!moved) {
-            selectNode(n.id);
-          } else {
-            try {
-              await api(`/api/nodes/${encodeURIComponent(n.id)}/position`, {
-                method: "PATCH",
-                body: JSON.stringify({ pos_x: n.pos_x, pos_y: n.pos_y }),
-              });
-            } catch (err) {
-              toast(`保存坐标失败：${err.message}`, "error");
-            }
+      const chip = ev.target.closest('.rule-chip');
+      if (chip) {
+        const rid = chip.dataset.ruleId;
+        const nextEnabled = chip.dataset.enabled !== '1';
+        try {
+          await api(`/api/jinghua/rules/${rid}`, { method: 'PATCH', body: { enabled: nextEnabled } });
+          await loadJinghuaRules();
+        } catch (err) {
+          toast(err.message, 'err');
+        }
+      }
+    });
+
+    $('#jinghua-new-pattern').addEventListener('keydown', async (ev) => {
+      if (ev.key !== 'Enter') return;
+      const val = ev.target.value.trim();
+      if (!val) return;
+      try {
+        await api('/api/jinghua/rules', { method: 'POST', body: { bad_pattern: val } });
+        ev.target.value = '';
+        toast(`已拉黑禁词：${val}`, 'ok');
+        await loadJinghuaRules();
+      } catch (err) {
+        toast(err.message, 'err');
+      }
+    });
+  }
+
+  // -------------------------------------------------------------------------
+  // 拖拽文件直接喂书 + 「+ 喂小说」按钮选择上传
+  // -------------------------------------------------------------------------
+  async function uploadNovelFile(file, genreId) {
+    if (!file) return;
+    const ext = (file.name.split('.').pop() || '').toLowerCase();
+    if (!['txt', 'docx'].includes(ext)) {
+      toast('仅支持 .txt 或 .docx 小说文件', 'err');
+      return;
+    }
+
+    const tagObj = (state.universe.tags || []).find((t) => t.id === genreId);
+    toast(`正在解析喂入【${tagObj ? tagObj.name : genreId}】：${file.name}...`);
+
+    try {
+      const form = new FormData();
+      form.append('file', file);
+      form.append('genre_id', genreId);
+      const res = await api('/api/upload-novel', { method: 'POST', body: form });
+      const info = res.result || res;
+
+      if (tagObj) {
+        state.expandedChannels.add(tagObj.channel || '通用');
+        state.expandedTagIds.add(tagObj.id);
+      }
+
+      await loadUniverse(false);
+      const corruptNote = info.corrupted_chapters > 0 ? `，已隔离防盗 ${info.corrupted_chapters} 章` : '';
+      toast(`入库成功：《${info.title}》（干净 ${info.clean_chapters} 章${corruptNote}，待试菜 ${info.pending_snippets_count ?? 0} 条）`, 'ok');
+
+      if (tagObj) {
+        state.selectedNodeId = `tag:${tagObj.id}`;
+        refreshHighlightClasses();
+        await openTagDrawer(tagObj);
+      }
+    } catch (err) {
+      toast(`喂书失败：${err.message}`, 'err');
+    }
+  }
+
+  function renderUploadTagPopover(filterText = '') {
+    const q = filterText.trim().toLowerCase();
+    const list = (state.universe.tags || []).filter((t) =>
+      !q || (t.name || '').toLowerCase().includes(q) || (t.channel || '').toLowerCase().includes(q)
+    );
+    $('#upload-tag-list').innerHTML = list.map((t) => `
+      <button class="upload-tag-pill" type="button" data-gid="${escHtml(t.id)}">
+        <span style="color:${CHANNEL_COLORS[t.channel] || '#7dd3fc'}">●</span>
+        <span>${escHtml(t.channel)} · ${escHtml(t.name)}</span>
+      </button>
+    `).join('');
+  }
+
+  function openUploadTagPicker(file) {
+    state.pendingUploadFile = file;
+    $('#upload-file-name').textContent = `待导入文件：${file.name}`;
+    $('#upload-tag-filter').value = '';
+    renderUploadTagPopover('');
+    $('#upload-tag-popover').classList.remove('hidden');
+    $('#upload-tag-filter').focus();
+  }
+
+  function initUploadAndDragDrop() {
+    const fileInput = $('#novel-file-input');
+
+    $('#btn-feed-novel').addEventListener('click', () => {
+      // 如果当前已选中某个标签或书籍，直接喂到那个标签；否则先选文件再弹出极简标签选择器
+      const selNode = state.selectedNodeId ? simNodes.get(state.selectedNodeId) : null;
+      state.feedTargetGenreId = selNode?.genreId || null;
+      fileInput.value = '';
+      fileInput.click();
+    });
+
+    $('#drawer-feed-here').addEventListener('click', () => {
+      fileInput.value = '';
+      fileInput.click();
+    });
+
+    fileInput.addEventListener('change', () => {
+      const file = fileInput.files && fileInput.files[0];
+      if (!file) return;
+      if (state.feedTargetGenreId) {
+        const targetGid = state.feedTargetGenreId;
+        state.feedTargetGenreId = null;
+        uploadNovelFile(file, targetGid);
+      } else {
+        openUploadTagPicker(file);
+      }
+    });
+
+    $('#upload-popover-close').addEventListener('click', () => {
+      state.pendingUploadFile = null;
+      $('#upload-tag-popover').classList.add('hidden');
+    });
+
+    $('#upload-tag-filter').addEventListener('input', (ev) => {
+      renderUploadTagPopover(ev.target.value);
+    });
+
+    $('#upload-tag-list').addEventListener('click', (ev) => {
+      const btn = ev.target.closest('.upload-tag-pill');
+      if (!btn || !state.pendingUploadFile) return;
+      const file = state.pendingUploadFile;
+      state.pendingUploadFile = null;
+      $('#upload-tag-popover').classList.add('hidden');
+      uploadNovelFile(file, btn.dataset.gid);
+    });
+
+    // 全屏拖拽文件直接投喂到对应标签胶囊
+    let activeDropTagId = null;
+    const hintBanner = $('#drop-hint-banner');
+
+    function clearDropHover() {
+      if (activeDropTagId) {
+        const g = nodeDomMap.get(activeDropTagId);
+        if (g) {
+          g.classList.remove('is-drop-hover');
+          const tip = g.querySelector('.node-drop-tip');
+          if (tip) tip.classList.add('hidden');
+        }
+        activeDropTagId = null;
+      }
+    }
+
+    function findTagUnderCursor(clientX, clientY) {
+      if (state.mode !== 'universe') return null;
+      const rect = svgElRoot.getBoundingClientRect();
+      const wx = (clientX - rect.left - state.view.x) / state.view.scale;
+      const wy = (clientY - rect.top - state.view.y) / state.view.scale;
+      for (const node of simNodes.values()) {
+        if (node.kind !== 'tag') continue;
+        if (Math.abs(wx - node.x) <= node.width / 2 + 12 && Math.abs(wy - node.y) <= node.height / 2 + 10) {
+          return node;
+        }
+      }
+      return null;
+    }
+
+    window.addEventListener('dragover', (ev) => {
+      if (!ev.dataTransfer || !Array.from(ev.dataTransfer.types).includes('Files')) return;
+      ev.preventDefault();
+      hintBanner.classList.remove('hidden');
+
+      const hitTag = findTagUnderCursor(ev.clientX, ev.clientY);
+      const nextId = hitTag ? hitTag.id : null;
+      if (nextId !== activeDropTagId) {
+        clearDropHover();
+        if (nextId) {
+          activeDropTagId = nextId;
+          const g = nodeDomMap.get(nextId);
+          if (g) {
+            g.classList.add('is-drop-hover');
+            const tip = g.querySelector('.node-drop-tip');
+            if (tip) tip.classList.remove('hidden');
           }
         }
-
-        window.addEventListener("mousemove", onMove);
-        window.addEventListener("mouseup", onUp);
-      });
-
-      nodesLayer.appendChild(card);
-    }
-  }
-
-  function redrawEdgesOnly(nodes, choices) {
-    // Re-render only edges & SVG paths smoothly during drag
-    const svg = $("graph-svg");
-    const edgesLayer = $("graph-edges-layer");
-    svg.querySelectorAll("path").forEach((p) => p.remove());
-    edgesLayer.innerHTML = "";
-    const nodeMap = new Map(nodes.map((n) => [n.id, n]));
-    const NODE_W = 210;
-    const NODE_H = 100;
-
-    for (const c of choices) {
-      const from = nodeMap.get(c.from_node_id);
-      const to = nodeMap.get(c.to_node_id);
-      if (!from || !to) continue;
-      const x1 = Number(from.pos_x || 120) + NODE_W / 2;
-      const y1 = Number(from.pos_y || 120) + NODE_H / 2;
-      const x2 = Number(to.pos_x || 120) + NODE_W / 2;
-      const y2 = Number(to.pos_y || 120) + NODE_H / 2;
-      const dx = x2 - x1;
-      const dy = y2 - y1;
-      const len = Math.hypot(dx, dy) || 1;
-      const cx = (x1 + x2) / 2 + (-dy / len) * 26;
-      const cy = (y1 + y2) / 2 + (dx / len) * 26;
-      const tx = x2 - (dx / len) * 65;
-      const ty = y2 - (dy / len) * 45;
-
-      const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
-      path.setAttribute("d", `M ${x1} ${y1} Q ${cx} ${cy} ${tx} ${ty}`);
-      path.setAttribute("fill", "none");
-      path.setAttribute("stroke", "#677080");
-      path.setAttribute("stroke-width", "2.2");
-      path.setAttribute("marker-end", "url(#arrow-head)");
-      svg.appendChild(path);
-
-      const lx = 0.25 * x1 + 0.5 * cx + 0.25 * tx;
-      const ly = 0.25 * y1 + 0.5 * cy + 0.25 * ty;
-      const lbl = document.createElement("div");
-      lbl.className = "graph-edge-label";
-      lbl.style.left = `${lx}px`;
-      lbl.style.top = `${ly}px`;
-      lbl.innerHTML = `<div style="font-weight:700;">${escapeHtml(c.choice_label)}</div>`;
-      edgesLayer.appendChild(lbl);
-    }
-  }
-
-  function selectNode(nodeId) {
-    state.selectedNodeId = nodeId;
-    document.querySelectorAll(".story-node-card").forEach((el) => {
-      el.classList.toggle("selected", el.dataset.nodeId === nodeId);
-    });
-
-    const node = (state.graph.nodes || []).find((n) => n.id === nodeId);
-    if (!node) return;
-
-    $("editor-heading").textContent = `编辑场次：${node.node_code || ""} ${node.title}`;
-    $("editor-sub").textContent = `当前精话锁得分：${node.jinghua_score ?? 100} 分 · 支持改后自动存档对比`;
-    $("edit-node-id").value = node.id;
-    $("edit-node-code").value = node.node_code || "S1";
-    $("edit-node-title").value = node.title || "";
-    $("edit-node-episode").value = node.episode_num || 1;
-    $("edit-node-type").value = node.node_type || "scene";
-    $("edit-node-rating").value = String(node.user_rating || 0);
-    $("edit-node-speakers").value = node.speaker_summary || "";
-    $("edit-node-cue").value = node.camera_or_acting_cue || "";
-    $("edit-node-script").value = node.script_text || "";
-    $("edit-node-note").value = node.revision_note || "";
-    $("node-check-feedback").innerHTML = "";
-
-    renderSelectedNodeChoices(node.id);
-  }
-
-  function clearNodeEditor() {
-    state.selectedNodeId = "";
-    $("editor-heading").textContent = "选中场次台词编辑器";
-    $("editor-sub").textContent = "请在左侧点选或新增一个场次卡片";
-    $("form-node-editor").reset();
-    $("edit-node-id").value = "";
-    $("selected-node-choices").innerHTML = "";
-  }
-
-  function renderSelectedNodeChoices(nodeId) {
-    const outgoing = (state.graph.choices || []).filter((c) => c.from_node_id === nodeId);
-    const nodeMap = new Map((state.graph.nodes || []).map((n) => [n.id, n]));
-    const box = $("selected-node-choices");
-
-    if (!outgoing.length) {
-      box.innerHTML = `<div style="font-size:13px; color:var(--ink-muted);">本场目前没有往外连出的玩家选项。如果是结局请保持“好/坏/隐藏结局”属性；如果是过场戏请点击上方「＋ 从本场加选项」。</div>`;
-      return;
-    }
-
-    box.innerHTML = outgoing
-      .map((c) => {
-        const target = nodeMap.get(c.to_node_id);
-        const targetLabel = target ? `${target.node_code} ${target.title}` : c.to_node_id;
-        const deltaStr = formatDelta(c.state_delta);
-        return `
-          <div style="background:#fff; border:1px solid var(--border-soft); border-radius:8px; padding:8px 10px; margin-bottom:8px; display:flex; justify-content:space-between; align-items:center; gap:8px;">
-            <div style="font-size:13px;">
-              <div><strong>${escapeHtml(c.choice_label)}</strong> → <span style="color:var(--cobalt);">${escapeHtml(targetLabel)}</span></div>
-              <div style="font-size:12px; color:var(--ink-muted);">
-                ${c.choice_tag ? `标签：${escapeHtml(c.choice_tag)} · ` : ""}
-                ${c.condition_expr ? `条件：${escapeHtml(c.condition_expr)} · ` : ""}
-                ${deltaStr ? `数值：${escapeHtml(deltaStr)}` : ""}
-              </div>
-            </div>
-            <div style="display:flex; gap:6px;">
-              <button type="button" class="btn btn-sm" data-edit-choice="${escapeHtml(c.id)}">编辑</button>
-              <button type="button" class="btn btn-sm btn-crimson" data-del-choice="${escapeHtml(c.id)}">删</button>
-            </div>
-          </div>
-        `;
-      })
-      .join("");
-
-    box.querySelectorAll("[data-edit-choice]").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        const ch = (state.graph.choices || []).find((x) => x.id === btn.dataset.editChoice);
-        if (ch) openChoiceModal(ch);
-      });
-    });
-
-    box.querySelectorAll("[data-del-choice]").forEach((btn) => {
-      btn.addEventListener("click", async () => {
-        try {
-          await api(`/api/choices/${encodeURIComponent(btn.dataset.delChoice)}`, { method: "DELETE" });
-          toast("已删除分支选项", "success");
-          await loadProjectGraph(state.currentProjectId);
-        } catch (err) {
-          toast(err.message, "error");
-        }
-      });
-    });
-  }
-
-  function openChoiceModal(existingChoice = null, defaultFromId = null) {
-    const nodes = state.graph.nodes || [];
-    if (nodes.length < 2) {
-      toast("至少需要 2 个剧情场次才能连线哦", "error");
-      return;
-    }
-    const opts = nodes.map((n) => `<option value="${escapeHtml(n.id)}">${escapeHtml(n.node_code)} · ${escapeHtml(n.title)}</option>`).join("");
-    $("choice-from-node").innerHTML = opts;
-    $("choice-to-node").innerHTML = opts;
-
-    if (existingChoice) {
-      $("choice-edit-id").value = existingChoice.id;
-      $("choice-from-node").value = existingChoice.from_node_id;
-      $("choice-to-node").value = existingChoice.to_node_id;
-      $("choice-label-input").value = existingChoice.choice_label || "";
-      $("choice-tag-input").value = existingChoice.choice_tag || "";
-      $("choice-condition-input").value = existingChoice.condition_expr || "";
-      $("choice-delta-input").value = JSON.stringify(existingChoice.state_delta || {});
-      $("btn-delete-choice-modal").style.display = "inline-flex";
-    } else {
-      $("choice-edit-id").value = "";
-      $("choice-from-node").value = defaultFromId || state.selectedNodeId || nodes[0].id;
-      $("choice-to-node").value = nodes.find((n) => n.id !== $("choice-from-node").value)?.id || nodes[0].id;
-      $("choice-label-input").value = "";
-      $("choice-tag-input").value = "";
-      $("choice-condition-input").value = "";
-      $("choice-delta-input").value = '{"好感度": 10}';
-      $("btn-delete-choice-modal").style.display = "none";
-    }
-    openModal("modal-choice-editor");
-  }
-
-  // ---------- Event Bindings ----------
-  function bindEvents() {
-    $("btn-refresh-all").addEventListener("click", async () => {
-      await refreshAll();
-      toast("已刷新全部最新数据", "success");
-    });
-
-    // Tab 1
-    $("btn-show-all-drawers").addEventListener("click", async () => {
-      state.selectedDrawerId = "";
-      renderDrawers();
-      await loadWorks();
-    });
-
-    $("btn-open-new-drawer").addEventListener("click", () => openModal("modal-new-drawer"));
-
-    $("form-new-drawer").addEventListener("submit", async (e) => {
-      e.preventDefault();
-      try {
-        await api("/api/genres", {
-          method: "POST",
-          body: JSON.stringify({
-            name: $("drawer-name-input").value.trim(),
-            genre_id: $("drawer-id-input").value.trim() || null,
-            description: $("drawer-desc-input").value.trim(),
-            channel_hint: $("drawer-hint-input").value.trim(),
-          }),
-        });
-        $("form-new-drawer").reset();
-        closeAllModals();
-        toast("新类型抽屉已创建", "success");
-        await loadDashboard();
-      } catch (err) {
-        toast(err.message, "error");
       }
     });
 
-    $("form-import-novel").addEventListener("submit", async (e) => {
-      e.preventDefault();
-      const btn = $("btn-import-submit");
-      btn.disabled = true;
-      btn.textContent = "正在读取分章并检测防盗乱码……";
-      try {
-        const data = await api("/api/works/import", {
-          method: "POST",
-          body: JSON.stringify({
-            file_path: $("import-file-path").value.trim(),
-            genre_id: $("import-genre-id").value,
-            title: $("import-title").value.trim() || null,
-            author: $("import-author").value.trim(),
-          }),
-        });
-        const r = data.result || {};
-        $("import-result-box").innerHTML = `
-          <div style="background:var(--jade-soft); border:1px solid #b8e3d1; border-radius:10px; padding:12px; font-size:13.5px;">
-            <div style="font-weight:700; color:var(--jade); margin-bottom:4px;">${r.already_exists ? "该书已在书架中：" : "导入成功："}《${escapeHtml(r.title || "新书")}》</div>
-            <div>共切出 ${r.total_chapters ?? 0} 章 · 完好可用 ${r.clean_chapters ?? 0} 章 · 自动隔离坏章 ${r.corrupted_chapters ?? 0} 章</div>
-            <div>已抽出 ${r.pending_snippets_count ?? r.extracted_snippets ?? 0} 段候选对白放进「试菜台」</div>
-            <button id="btn-go-taste-after-import" class="btn btn-sm btn-primary" type="button" style="margin-top:8px;">马上去试菜打勾 ✓/✗</button>
-          </div>
-        `;
-        $("btn-go-taste-after-import").addEventListener("click", async () => {
-          $("taste-work-filter").value = r.work_id || "";
-          switchMainTab("tab-taste");
-          await loadPendingSnippets();
-        });
-        toast("小说导入完成！", "success");
-        await Promise.all([loadDashboard(), loadWorks(), loadPendingSnippets()]);
-      } catch (err) {
-        $("import-result-box").innerHTML = `<div style="background:var(--crimson-soft); color:var(--crimson); padding:10px; border-radius:8px; font-size:13px;">${escapeHtml(err.message)}</div>`;
-        toast(err.message, "error");
-      } finally {
-        btn.disabled = false;
-        btn.textContent = "一键导入并挑出试菜对白";
+    window.addEventListener('dragleave', (ev) => {
+      if (ev.clientX <= 0 || ev.clientY <= 0 || ev.clientX >= window.innerWidth || ev.clientY >= window.innerHeight) {
+        hintBanner.classList.add('hidden');
+        clearDropHover();
       }
     });
 
-    // Reader pagination
-    $("btn-span-prev").addEventListener("click", () => {
-      const nextStart = Math.max(1, state.reader.lineStart - 80);
-      loadChapterSpan(state.reader.workId, state.reader.chapterNum, nextStart, nextStart + 79);
-    });
-    $("btn-span-next").addEventListener("click", () => {
-      const nextStart = state.reader.lineEnd + 1;
-      loadChapterSpan(state.reader.workId, state.reader.chapterNum, nextStart, nextStart + 79);
-    });
+    window.addEventListener('drop', (ev) => {
+      if (!ev.dataTransfer || !ev.dataTransfer.files || ev.dataTransfer.files.length === 0) return;
+      ev.preventDefault();
+      hintBanner.classList.add('hidden');
+      const hitTag = findTagUnderCursor(ev.clientX, ev.clientY);
+      clearDropHover();
 
-    // Tab 2
-    $("taste-genre-filter").addEventListener("change", () => loadPendingSnippets());
-    $("taste-work-filter").addEventListener("change", () => loadPendingSnippets());
-    $("btn-reload-taste").addEventListener("click", () => loadPendingSnippets());
-
-    $("kb-genre-filter").addEventListener("change", () => {
-      loadApprovedSnippets();
-      loadCharacters();
-      loadHighlights();
-    });
-    $("btn-kb-search").addEventListener("click", () => loadApprovedSnippets());
-    $("kb-search-query").addEventListener("keydown", (e) => {
-      if (e.key === "Enter") {
-        e.preventDefault();
-        loadApprovedSnippets();
-      }
-    });
-
-    $("btn-open-add-snippet").addEventListener("click", () => openModal("modal-add-snippet"));
-    $("btn-open-add-char").addEventListener("click", () => openModal("modal-add-char"));
-    $("btn-open-add-highlight").addEventListener("click", () => openModal("modal-add-highlight"));
-
-    $("form-add-snippet").addEventListener("submit", async (e) => {
-      e.preventDefault();
-      try {
-        await api("/api/snippets", {
-          method: "POST",
-          body: JSON.stringify({
-            genre_id: $("add-snippet-genre").value,
-            scene_tag: $("add-snippet-tag").value.trim(),
-            raw_text: $("add-snippet-raw").value.trim(),
-            trigger_context: $("add-snippet-context").value.trim(),
-            why_funny_or_effective: $("add-snippet-why").value.trim(),
-            status: "approved",
-          }),
-        });
-        $("form-add-snippet").reset();
-        closeAllModals();
-        toast("好梗已直接收进抽屉！", "success");
-        await Promise.all([loadDashboard(), loadApprovedSnippets()]);
-      } catch (err) {
-        toast(err.message, "error");
-      }
-    });
-
-    $("form-add-char").addEventListener("submit", async (e) => {
-      e.preventDefault();
-      try {
-        const samples = $("char-samples")
-          .value.split(/\r?\n/)
-          .map((s) => s.trim())
-          .filter(Boolean);
-        await api("/api/characters", {
-          method: "POST",
-          body: JSON.stringify({
-            genre_id: $("char-genre").value,
-            name: $("char-name").value.trim(),
-            role_type: $("char-role").value.trim(),
-            traits: $("char-traits").value.trim(),
-            speech_style: $("char-speech").value.trim(),
-            forbidden_words: $("char-forbidden").value.trim(),
-            sample_lines: samples,
-          }),
-        });
-        $("form-add-char").reset();
-        closeAllModals();
-        toast("人物声音卡已保存！", "success");
-        await Promise.all([loadDashboard(), loadCharacters()]);
-      } catch (err) {
-        toast(err.message, "error");
-      }
-    });
-
-    $("form-add-highlight").addEventListener("submit", async (e) => {
-      e.preventDefault();
-      try {
-        await api("/api/highlights", {
-          method: "POST",
-          body: JSON.stringify({
-            genre_id: $("hl-genre").value,
-            hook_type: $("hl-hook-type").value.trim(),
-            plain_summary: $("hl-summary").value.trim(),
-            why_it_hooks: $("hl-why").value.trim(),
-          }),
-        });
-        $("form-add-highlight").reset();
-        closeAllModals();
-        toast("名场面钩子卡已保存！", "success");
-        await loadHighlights();
-      } catch (err) {
-        toast(err.message, "error");
-      }
-    });
-
-    // Tab 3
-    $("btn-fill-oily-demo").addEventListener("click", () => {
-      $("jinghua-test-input").value =
-        '陆总推门进来，满屋杀气瞬间卡壳，他粗嗓门硬生生夹细了八度，老脸涨成猪肝色，空气突然安静得可怕。\n旁边的助理石化在原地，嘴角抽搐了一下，眼底闪过一丝不易察觉的三分薄凉。\n“你别乱动，先听我说完。”';
-    });
-
-    $("btn-run-jinghua-check").addEventListener("click", async () => {
-      const txt = $("jinghua-test-input").value.trim();
-      if (!txt) {
-        toast("请先粘贴一段需要体检的文本", "error");
-        return;
-      }
-      try {
-        await runJinghuaTester(txt);
-      } catch (err) {
-        toast(err.message, "error");
-      }
-    });
-
-    $("form-add-rule").addEventListener("submit", async (e) => {
-      e.preventDefault();
-      try {
-        await api("/api/jinghua/rules", {
-          method: "POST",
-          body: JSON.stringify({
-            bad_pattern: $("rule-bad-pattern").value.trim(),
-            category: $("rule-category").value,
-            reason: $("rule-reason").value.trim(),
-            good_replacement_example: $("rule-replacement").value.trim(),
-          }),
-        });
-        $("form-add-rule").reset();
-        toast("已永久锁死这个讨厌表达！", "success");
-        await Promise.all([loadJinghuaRules(), loadDashboard()]);
-      } catch (err) {
-        toast(err.message, "error");
-      }
-    });
-
-    // Tab 4
-    $("drama-project-select").addEventListener("change", async () => {
-      state.currentProjectId = $("drama-project-select").value;
-      state.selectedNodeId = "";
-      await loadProjectGraph(state.currentProjectId);
-    });
-
-    $("btn-open-new-project").addEventListener("click", () => openModal("modal-new-project"));
-
-    $("form-new-project").addEventListener("submit", async (e) => {
-      e.preventDefault();
-      let vars = {};
-      try {
-        vars = JSON.parse($("proj-vars").value.trim() || "{}");
-      } catch {
-        toast("初始数值变量必须是合法 JSON，例如 {\"好感度\": 0}", "error");
-        return;
-      }
-      try {
-        const data = await api("/api/projects", {
-          method: "POST",
-          body: JSON.stringify({
-            title: $("proj-title").value.trim(),
-            genre_id: $("proj-genre").value,
-            project_mode: $("proj-mode").value,
-            synopsis: $("proj-synopsis").value.trim(),
-            state_vars: vars,
-          }),
-        });
-        $("form-new-project").reset();
-        closeAllModals();
-        state.currentProjectId = data.item.id;
-        state.selectedNodeId = "";
-        toast("新互动剧本已创建", "success");
-        await Promise.all([loadProjects(), loadDashboard()]);
-      } catch (err) {
-        toast(err.message, "error");
-      }
-    });
-
-    $("btn-add-node").addEventListener("click", async () => {
-      if (!state.currentProjectId) {
-        toast("请先新建一个互动剧本", "error");
-        return;
-      }
-      const existingCount = (state.graph.nodes || []).length;
-      const code = `S${existingCount + 1}`;
-      const px = 80 + ((existingCount * 240) % 760);
-      const py = 80 + Math.floor((existingCount * 240) / 760) * 160;
-      try {
-        const data = await api(`/api/projects/${encodeURIComponent(state.currentProjectId)}/nodes`, {
-          method: "POST",
-          body: JSON.stringify({
-            title: `新场次 ${code}`,
-            node_code: code,
-            episode_num: 1,
-            node_type: existingCount === 0 ? "start" : "scene",
-            pos_x: px,
-            pos_y: py,
-          }),
-        });
-        state.selectedNodeId = data.item.id;
-        toast("已新增剧情场次", "success");
-        await loadProjectGraph(state.currentProjectId);
-      } catch (err) {
-        toast(err.message, "error");
-      }
-    });
-
-    $("btn-open-add-choice").addEventListener("click", () => openChoiceModal(null));
-    $("btn-add-choice-from-selected").addEventListener("click", () =>
-      openChoiceModal(null, state.selectedNodeId)
-    );
-
-    $("form-choice-editor").addEventListener("submit", async (e) => {
-      e.preventDefault();
-      if (!state.currentProjectId) return;
-      let delta = {};
-      try {
-        delta = JSON.parse($("choice-delta-input").value.trim() || "{}");
-      } catch {
-        toast("数值变化必须是合法 JSON，例如 {\"好感度\": 10}", "error");
-        return;
-      }
-      try {
-        await api(`/api/projects/${encodeURIComponent(state.currentProjectId)}/choices`, {
-          method: "POST",
-          body: JSON.stringify({
-            choice_id: $("choice-edit-id").value || null,
-            from_node_id: $("choice-from-node").value,
-            to_node_id: $("choice-to-node").value,
-            choice_label: $("choice-label-input").value.trim(),
-            choice_tag: $("choice-tag-input").value.trim(),
-            condition_expr: $("choice-condition-input").value.trim(),
-            state_delta: delta,
-          }),
-        });
-        closeAllModals();
-        toast("分支连线已保存", "success");
-        await loadProjectGraph(state.currentProjectId);
-      } catch (err) {
-        toast(err.message, "error");
-      }
-    });
-
-    $("btn-delete-choice-modal").addEventListener("click", async () => {
-      const cid = $("choice-edit-id").value;
-      if (!cid) return;
-      try {
-        await api(`/api/choices/${encodeURIComponent(cid)}`, { method: "DELETE" });
-        closeAllModals();
-        toast("已删除分支连线", "success");
-        await loadProjectGraph(state.currentProjectId);
-      } catch (err) {
-        toast(err.message, "error");
-      }
-    });
-
-    $("form-node-editor").addEventListener("submit", async (e) => {
-      e.preventDefault();
-      const nid = $("edit-node-id").value;
-      if (!nid) {
-        toast("请先在左侧点选一个场次卡片", "error");
-        return;
-      }
-      const curNode = (state.graph.nodes || []).find((n) => n.id === nid);
-      try {
-        await api(`/api/nodes/${encodeURIComponent(nid)}`, {
-          method: "PUT",
-          body: JSON.stringify({
-            project_id: state.currentProjectId,
-            node_code: $("edit-node-code").value.trim(),
-            title: $("edit-node-title").value.trim(),
-            episode_num: Number($("edit-node-episode").value || 1),
-            node_type: $("edit-node-type").value,
-            user_rating: Number($("edit-node-rating").value || 0),
-            speaker_summary: $("edit-node-speakers").value.trim(),
-            camera_or_acting_cue: $("edit-node-cue").value.trim(),
-            script_text: $("edit-node-script").value,
-            revision_note: $("edit-node-note").value.trim(),
-            pos_x: curNode ? curNode.pos_x : 120,
-            pos_y: curNode ? curNode.pos_y : 120,
-          }),
-        });
-        toast("场次台词已保存（若有改动已留存历史版本）", "success");
-        await loadProjectGraph(state.currentProjectId);
-      } catch (err) {
-        toast(err.message, "error");
-      }
-    });
-
-    $("btn-node-jinghua").addEventListener("click", async () => {
-      const txt = $("edit-node-script").value.trim();
-      if (!txt) {
-        toast("请先输入本场剧本正文再体检", "error");
-        return;
-      }
-      try {
-        const data = await api("/api/jinghua/check", {
-          method: "POST",
-          body: JSON.stringify({ text: txt }),
-        });
-        const r = data.result || {};
-        const hits = r.hits || [];
-        $("node-check-feedback").innerHTML = `
-          <div style="background:${r.passed ? "var(--jade-soft)" : "var(--crimson-soft)"}; border-radius:8px; padding:10px; font-size:13px;">
-            <strong>精话锁得分：${r.score ?? 100} 分</strong> · ${r.passed ? "干净过关！" : `发现 ${hits.length} 处油腻表达：${hits.map((h) => h.pattern || h.bad_pattern).join("、")}`}
-            ${r.rewrite_guide && !r.passed ? `<div style="margin-top:4px; color:var(--ink-secondary);">${escapeHtml(r.rewrite_guide)}</div>` : ""}
-          </div>
-        `;
-      } catch (err) {
-        toast(err.message, "error");
-      }
-    });
-
-    $("btn-node-originality").addEventListener("click", async () => {
-      const txt = $("edit-node-script").value.trim();
-      if (!txt) {
-        toast("请先输入本场剧本正文再查重", "error");
-        return;
-      }
-      const proj = state.graph.project || {};
-      try {
-        const data = await api("/api/originality/check", {
-          method: "POST",
-          body: JSON.stringify({
-            draft_text: txt,
-            genre_id: proj.genre_id || null,
-          }),
-        });
-        const r = data.result || {};
-        const passed = r.passed !== false && !r.is_plagiarized;
-        const maxSim = r.max_similarity ?? r.similarity ?? 0;
-        const matches = r.matches || r.warnings || [];
-        $("node-check-feedback").innerHTML = `
-          <div style="background:${passed ? "var(--jade-soft)" : "var(--amber-soft)"}; border-radius:8px; padding:10px; font-size:13px;">
-            <strong>${escapeHtml(r.summary || (passed ? "通过，安全原创" : "存在高相似句子，建议改写"))}</strong>
-            <div style="margin-top:2px;">最高局部相似度：${(Number(maxSim) * 100).toFixed(1)}%</div>
-            ${matches.length ? `<div style="margin-top:4px; color:var(--ink-secondary);">最接近出处：《${escapeHtml(matches[0].work_title || "")}》${matches[0].chapter_num ? ` 第${matches[0].chapter_num}章` : ""}</div>` : ""}
-          </div>
-        `;
-      } catch (err) {
-        toast(err.message, "error");
-      }
-    });
-
-    $("btn-node-revisions").addEventListener("click", async () => {
-      const nid = $("edit-node-id").value;
-      if (!nid) return;
-      try {
-        const data = await api(`/api/nodes/${encodeURIComponent(nid)}/revisions`);
-        const items = data.items || [];
-        $("text-viewer-title").textContent = "本场历史修改记录对比";
-        $("text-viewer-body").innerHTML = items.length
-          ? items
-              .map(
-                (rev) => `
-                  <div style="border:1px solid var(--border-soft); border-radius:10px; padding:12px; margin-bottom:12px;">
-                    <div style="display:flex; justify-content:space-between; font-size:12.5px; color:var(--ink-muted);">
-                      <span>修改时间：${escapeHtml(rev.created_at || "")} · 评分：${rev.user_rating || 0} 星</span>
-                      <span>说明：${escapeHtml(rev.note || "手动修改")}</span>
-                    </div>
-                    <div class="revision-diff">
-                      <div class="revision-pane"><strong>改前：</strong>\n${escapeHtml(rev.old_text || "（空）")}</div>
-                      <div class="revision-pane" style="background:#f5fbf7;"><strong>改后：</strong>\n${escapeHtml(rev.new_text || "（空）")}</div>
-                    </div>
-                  </div>
-                `
-              )
-              .join("")
-          : `<div class="empty-state">本场还没有产生历史修改记录（每次修改台词并点「保存本场剧本」后会自动留底）。</div>`;
-        openModal("modal-text-viewer");
-      } catch (err) {
-        toast(err.message, "error");
-      }
-    });
-
-    $("btn-node-delete").addEventListener("click", async () => {
-      const nid = $("edit-node-id").value;
-      if (!nid) return;
-      try {
-        await api(`/api/nodes/${encodeURIComponent(nid)}`, { method: "DELETE" });
-        state.selectedNodeId = "";
-        toast("已删除该剧情场次", "success");
-        await loadProjectGraph(state.currentProjectId);
-      } catch (err) {
-        toast(err.message, "error");
-      }
-    });
-
-    $("btn-export-markdown").addEventListener("click", async () => {
-      if (!state.currentProjectId) return;
-      try {
-        const data = await api(`/api/projects/${encodeURIComponent(state.currentProjectId)}/export`, {
-          method: "POST",
-        });
-        const md = data.markdown || "";
-        $("text-viewer-title").textContent = "导出的互动影游完整台本 (Markdown，已自动存一份到 exports/ 目录)";
-        $("text-viewer-body").innerHTML = `
-          <textarea class="textarea" rows="18" readonly style="font-family: ui-monospace, Consolas, monospace;">${escapeHtml(md)}</textarea>
-        `;
-        openModal("modal-text-viewer");
-      } catch (err) {
-        toast(err.message, "error");
+      const file = ev.dataTransfer.files[0];
+      if (hitTag && hitTag.genreId) {
+        uploadNovelFile(file, hitTag.genreId);
+      } else {
+        openUploadTagPicker(file);
       }
     });
   }
 
-  async function refreshAll() {
-    await loadDashboard();
-    await Promise.all([
-      loadWorks(),
-      loadPendingSnippets(),
-      loadApprovedSnippets(),
-      loadCharacters(),
-      loadHighlights(),
-      loadJinghuaRules(),
-      loadProjects(),
-    ]);
-  }
-
-  // ---------- Boot ----------
-  document.addEventListener("DOMContentLoaded", async () => {
-    initTabs();
-    bindEvents();
+  // -------------------------------------------------------------------------
+  // 数据加载 & 模式切换
+  // -------------------------------------------------------------------------
+  async function loadUniverse(autoFit = false) {
     try {
-      await refreshAll();
+      const data = await api('/api/graph/universe');
+      state.universe = {
+        root: data.root || {},
+        channels: data.channels || [],
+        tags: data.tags || [],
+        works: data.works || [],
+      };
+      const lockCount = data.root?.enabled_jinghua_rules ?? data.root?.total_jinghua_rules;
+      if (lockCount !== undefined) {
+        $('#lock-rule-count').textContent = String(lockCount);
+      }
+      if (state.mode === 'universe') {
+        computeUniverseLayout();
+        if (autoFit || !didInitialFit) {
+          didInitialFit = true;
+          fitToScreen();
+        }
+      }
     } catch (err) {
-      toast(`初始化加载失败：${err.message}`, "error");
+      toast(`加载知识星图失败：${err.message}`, 'err');
     }
-  });
+  }
+
+  async function loadProjects() {
+    const res = await api('/api/projects');
+    state.projects = res.items || [];
+    const sel = $('#branch-project-select');
+    if (state.projects.length === 0) {
+      sel.innerHTML = '<option value="">暂无剧本，点击右侧新建</option>';
+      state.currentProjectId = null;
+      state.branchGraph = null;
+      if (state.mode === 'branching') computeBranchingLayout();
+      return;
+    }
+    if (!state.currentProjectId || !state.projects.some((p) => p.id === state.currentProjectId)) {
+      state.currentProjectId = state.projects[0].id;
+    }
+    sel.innerHTML = state.projects.map((p) =>
+      `<option value="${escHtml(p.id)}" ${p.id === state.currentProjectId ? 'selected' : ''}>${escHtml(p.title)} (${p.node_count ?? 0}幕)</option>`
+    ).join('');
+    await loadBranchGraph(state.currentProjectId, true);
+  }
+
+  async function loadBranchGraph(projectId, autoFit = false) {
+    if (!projectId) return;
+    try {
+      const graph = await api(`/api/projects/${projectId}/graph`);
+      state.branchGraph = graph;
+      const diag = graph.diagnostics || {};
+      const hp = $('#branch-health-pill');
+      const deadCount = (diag.dead_end_node_ids || []).length;
+      if (diag.is_healthy) {
+        hp.classList.remove('is-warn');
+        hp.textContent = `✓ 健康 · ${diag.total_nodes}幕`;
+      } else {
+        hp.classList.add('is-warn');
+        hp.textContent = deadCount > 0 ? `⚠ ${deadCount} 断头待补` : `⚠ 需补结局/起始幕`;
+      }
+
+      if (state.mode === 'branching') {
+        computeBranchingLayout();
+        if (autoFit) fitToScreen();
+      }
+    } catch (err) {
+      toast(`加载互动支线失败：${err.message}`, 'err');
+    }
+  }
+
+  function switchMode(mode) {
+    state.mode = mode;
+    state.selectedNodeId = null;
+    state.hoveredNodeId = null;
+    closeDrawer();
+    hidePopovers();
+
+    $('#mode-universe').classList.toggle('active', mode === 'universe');
+    $('#mode-branching').classList.toggle('active', mode === 'branching');
+    $('#controls-universe').classList.toggle('hidden', mode !== 'universe');
+    $('#controls-branching').classList.toggle('hidden', mode !== 'branching');
+
+    if (mode === 'universe') {
+      computeUniverseLayout();
+      fitToScreen();
+    } else {
+      loadProjects();
+    }
+  }
+
+  function initTopbarControls() {
+    $('#mode-universe').addEventListener('click', () => switchMode('universe'));
+    $('#mode-branching').addEventListener('click', () => switchMode('branching'));
+
+    const searchInput = $('#search-input');
+    const clearBtn = $('#search-clear');
+    let searchTimer = null;
+    searchInput.addEventListener('input', () => {
+      state.searchQuery = searchInput.value;
+      clearBtn.classList.toggle('hidden', !state.searchQuery);
+      if (state.mode === 'universe') {
+        computeUniverseLayout();
+      }
+      if (searchTimer) clearTimeout(searchTimer);
+      const q = state.searchQuery.trim();
+      if (!q) {
+        state.searchHitGenreIds.clear();
+        state.searchHitWorkIds.clear();
+        if (state.mode === 'universe') computeUniverseLayout();
+        return;
+      }
+      searchTimer = setTimeout(async () => {
+        try {
+          const [appRes, pendRes] = await Promise.all([
+            api(`/api/snippets?status=approved&query=${encodeURIComponent(q)}&limit=30`),
+            api(`/api/snippets?status=pending&query=${encodeURIComponent(q)}&limit=20`),
+          ]);
+          const hits = [...(appRes.items || []), ...(pendRes.items || [])];
+          state.searchHitGenreIds = new Set(hits.map((h) => h.genre_id).filter(Boolean));
+          state.searchHitWorkIds = new Set(hits.map((h) => h.work_id).filter(Boolean));
+          if (state.mode === 'universe') computeUniverseLayout();
+        } catch { /* ignore transient search errors */ }
+      }, 220);
+    });
+
+    clearBtn.addEventListener('click', () => {
+      searchInput.value = '';
+      state.searchQuery = '';
+      state.searchHitGenreIds.clear();
+      state.searchHitWorkIds.clear();
+      clearBtn.classList.add('hidden');
+      if (state.mode === 'universe') computeUniverseLayout();
+    });
+
+    $('#filter-populated-btn').addEventListener('click', () => {
+      state.onlyPopulated = !state.onlyPopulated;
+      $('#filter-populated-btn').classList.toggle('active', state.onlyPopulated);
+      $('#filter-populated-label').textContent = state.onlyPopulated ? '仅看有货' : '全部标签';
+      if (state.mode === 'universe') computeUniverseLayout();
+    });
+
+    $('#branch-project-select').addEventListener('change', (ev) => {
+      state.currentProjectId = ev.target.value;
+      loadBranchGraph(state.currentProjectId, true);
+    });
+
+    $('#btn-new-project').addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      hidePopovers();
+      $('#new-project-popover').classList.remove('hidden');
+      $('#new-proj-title').focus();
+    });
+
+    $('#new-proj-close').addEventListener('click', () => $('#new-project-popover').classList.add('hidden'));
+
+    $('#new-proj-submit').addEventListener('click', async () => {
+      const title = $('#new-proj-title').value.trim();
+      const synopsis = $('#new-proj-synopsis').value.trim();
+      if (!title) return toast('请填写剧本名称', 'err');
+      try {
+        const res = await api('/api/projects', {
+          method: 'POST',
+          body: { title, synopsis, project_mode: 'branching' },
+        });
+        const proj = res.item;
+        await api(`/api/projects/${proj.id}/nodes`, {
+          method: 'POST',
+          body: {
+            title: '第一幕：开场冲突',
+            node_code: 'S1',
+            node_type: 'start',
+            pos_x: 120,
+            pos_y: 80,
+          },
+        });
+        $('#new-proj-title').value = '';
+        $('#new-proj-synopsis').value = '';
+        $('#new-project-popover').classList.add('hidden');
+        state.currentProjectId = proj.id;
+        toast(`已创建剧本《${proj.title}》`, 'ok');
+        await loadProjects();
+      } catch (err) {
+        toast(err.message, 'err');
+      }
+    });
+
+    $('#btn-export-project').addEventListener('click', async () => {
+      if (!state.currentProjectId) return toast('请先选择或新建一个互动剧本', 'err');
+      try {
+        const res = await api(`/api/projects/${state.currentProjectId}/export`, { method: 'POST' });
+        await navigator.clipboard?.writeText(res.markdown).catch(() => {});
+        toast('已导出 Markdown 到 exports/ 并复制到剪贴板', 'ok');
+      } catch (err) {
+        toast(err.message, 'err');
+      }
+    });
+
+    $('#drawer-close').addEventListener('click', () => {
+      closeDrawer();
+      state.selectedNodeId = null;
+      refreshHighlightClasses();
+    });
+
+    window.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Escape') {
+        closeDrawer();
+        hidePopovers();
+        state.selectedNodeId = null;
+        refreshHighlightClasses();
+      }
+    });
+  }
+
+  // -------------------------------------------------------------------------
+  // 启动入口
+  // -------------------------------------------------------------------------
+  async function boot() {
+    initStageControls();
+    initTopbarControls();
+    initUploadAndDragDrop();
+    initJinghuaPanel();
+    await Promise.all([loadUniverse(true), loadJinghuaRules()]);
+  }
+
+  boot();
 })();
