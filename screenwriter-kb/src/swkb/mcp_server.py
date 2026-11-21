@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 try:
@@ -30,6 +31,7 @@ from swkb.originality import check_script_originality
 from swkb.repository import (
     get_dashboard_stats,
     get_graph_universe,
+    get_work_tags,
     list_characters,
     list_dialogue_snippets,
     list_genres,
@@ -38,6 +40,7 @@ from swkb.repository import (
     review_dialogue_snippet,
     save_dialogue_snippet,
     save_scene_highlight,
+    set_work_tags,
     upsert_character,
     upsert_genre,
 )
@@ -79,6 +82,35 @@ def _parse_json_arg(raw: Any, expected_type: type, field_name: str) -> Any:
             )
         return parsed
     raise ValueError(f"{field_name} 类型不支持：{type(raw).__name__}")
+
+
+def _parse_tag_csv(raw: str | list[str] | None) -> list[str]:
+    """Parse comma-separated tag IDs (or a JSON array string) into a clean deduplicated list."""
+    if raw is None:
+        return []
+    parts: list[str]
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            return []
+        if text.startswith("["):
+            try:
+                loaded = json.loads(text)
+                parts = [str(x) for x in loaded] if isinstance(loaded, list) else [text]
+            except (json.JSONDecodeError, ValueError):
+                parts = re.split(r"[,，;；\s]+", text)
+        else:
+            parts = re.split(r"[,，;；\s]+", text)
+    else:
+        parts = [str(x) for x in raw]
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for part in parts:
+        tid = part.strip()
+        if tid and tid not in seen:
+            seen.add(tid)
+            cleaned.append(tid)
+    return cleaned
 
 
 def _normalize_review_status(raw_status: str) -> str:
@@ -129,6 +161,8 @@ def kb_overview_and_drawers() -> dict[str, Any]:
                 "title": w.get("title"),
                 "author": w.get("author"),
                 "genre_id": w.get("genre_id"),
+                "tag_ids": w.get("tag_ids", []),
+                "tags": w.get("tags", []),
                 "total_chapters": w.get("total_chapters"),
                 "clean_chapters": w.get("clean_chapters"),
                 "corrupted_chapters": w.get("corrupted_chapters"),
@@ -191,29 +225,70 @@ def import_novel(
     genre_id: str = "mengwa",
     title: str = "",
     author: str = "",
+    extra_genre_ids: str = "",
+    auto_detect_tags: bool = True,
 ) -> dict[str, Any]:
-    """导入一本本地小说（支持 .txt 和 .docx，包括纯文本伪装的 .docx）进指定类型抽屉。
+    """导入一本本地小说（支持 .txt 和 .docx，包括纯文本伪装的 .docx），支持一书多标签与单梗智能分流。
 
     系统会自动识别编码转 UTF-8、切分章节并精准标记防盗乱码/截断坏章（绝不从坏章抽梗），
-    同时从干净章节中先抽取 10~15 段待试菜对白，方便后续用 get_taste_check_candidates 让用户打 ✓/✗。
+    同时为书籍挂载主标签与副标签（可手动传入 extra_genre_ids，也可开启 auto_detect_tags 自动识别 1~3 个高置信副标签），
+    并从干净章节中抽取 10~15 段待试菜对白按单段特征词分配至最贴合的标签抽屉。
 
     参数说明：
     - file_path: 小说文件在本地磁盘的绝对路径
-    - genre_id: 归入的类型抽屉 ID（默认 "mengwa"，可用 kb_overview_and_drawers 查看全部抽屉）
+    - genre_id: 主类型抽屉 ID（默认 "mengwa"，可用 kb_overview_and_drawers 查看全部抽屉）
     - title: 书名（留空则自动用文件名）
     - author: 作者名（可选）
+    - extra_genre_ids: 额外副标签 ID，逗号分隔，如 "chuanshu_sidun,mengwa"（可选）
+    - auto_detect_tags: 是否根据全书高频特征词自动识别 1~3 个高置信副标签（默认 True）
     """
     _ensure_db()
+    parsed_extras = _parse_tag_csv(extra_genre_ids)
     result = import_novel_file(
         file_path=file_path,
         genre_id=genre_id.strip() or "mengwa",
         title=title.strip() or None,
         author=author.strip(),
+        extra_genre_ids=parsed_extras or None,
+        auto_detect_tags=bool(auto_detect_tags),
     )
     return {
         "ok": True,
         "import_result": result,
-        "next_step": "请调用 get_taste_check_candidates 取出待试菜对白给用户打 ✓/✗，校准口味后再扫描核心章节入库。",
+        "next_step": "请调用 get_taste_check_candidates 取出待试菜对白给用户打 ✓/✗（可同步指定 genre_id 防止多标签串味），校准口味后再扫描核心章节入库。",
+    }
+
+
+@mcp.tool()
+def update_work_tags(
+    work_id: str,
+    primary_tag_id: str,
+    extra_tag_ids: str = "",
+) -> dict[str, Any]:
+    """修改一本书的主标签与副标签（一书多标签管理，最多 6 个标签）。
+
+    参数说明：
+    - work_id: 书籍 ID
+    - primary_tag_id: 主标签 ID（将同步更新 works.genre_id）
+    - extra_tag_ids: 副标签 ID 列表，逗号分隔，如 "chuanshu_sidun,xiuluochang"（留空则仅保留主标签）
+    """
+    _ensure_db()
+    wid = work_id.strip()
+    primary = primary_tag_id.strip()
+    if not wid or not primary:
+        raise ValueError("work_id 和 primary_tag_id 均不能为空")
+    extras = _parse_tag_csv(extra_tag_ids)
+    tags = set_work_tags(
+        work_id=wid,
+        primary_tag_id=primary,
+        extra_tag_ids=extras,
+    )
+    return {
+        "ok": True,
+        "work_id": wid,
+        "primary_tag_id": tags[0]["id"] if tags else primary,
+        "tag_ids": [t["id"] for t in tags],
+        "tags": tags,
     }
 
 
@@ -233,31 +308,28 @@ def get_taste_check_candidates(
     - limit: 返回条数，默认 10
     """
     _ensure_db()
-    wid = work_id.strip()
+    wid = work_id.strip() or None
     gid = genre_id.strip() or None
-    fetch_limit = max(limit * 5, 100) if wid else limit
-    rows = list_dialogue_snippets(
+    candidates = list_dialogue_snippets(
         genre_id=gid,
         status="pending",
-        limit=fetch_limit,
+        limit=limit,
+        work_id=wid,
     )
-    if wid:
-        rows = [item for item in rows if item.get("work_id") == wid]
-    candidates = rows[:limit]
     return {
         "count": len(candidates),
         "candidates": candidates,
-        "instruction": "请把这些带章号与原话的片段展示给用户，让用户直接回复每条是 ✓ 还是 ✗（或告诉你要哪种味道），再调用 submit_taste_reviews 提交。",
+        "instruction": "请把这些带章号与原话的片段展示给用户，让用户直接回复每条是 ✓ 还是 ✗（并可指定归属哪个标签抽屉），再调用 submit_taste_reviews 提交。",
     }
 
 
 @mcp.tool()
 def submit_taste_reviews(reviews_json: str) -> dict[str, Any]:
-    """批量提交用户对试菜对白的 ✓（approved）或 ✗（rejected）审核结果，校准抽屉口味。
+    """批量提交用户对试菜对白的 ✓（approved）或 ✗（rejected）审核结果，支持按条指定归属标签 genre_id 防止串味。
 
     参数说明：
     - reviews_json: JSON 数组字符串，每项格式为：
-      {"snippet_id": "片段ID", "status": "approved 或 rejected（也支持 ✓ / ✗）", "rating": 5, "scene_tag": "可选场景标签"}
+      {"snippet_id": "片段ID", "status": "approved 或 rejected（也支持 ✓ / ✗）", "rating": 5, "scene_tag": "可选场景标签", "genre_id": "可选目标标签ID"}
     """
     _ensure_db()
     reviews = _parse_json_arg(reviews_json, list, "reviews_json")
@@ -278,11 +350,13 @@ def submit_taste_reviews(reviews_json: str) -> dict[str, Any]:
             norm_status = _normalize_review_status(str(item.get("status", "")))
             rating = int(item.get("rating", 5 if norm_status == "approved" else 1))
             scene_tag = item.get("scene_tag")
+            target_genre = item.get("genre_id")
             updated = review_dialogue_snippet(
                 snippet_id=snippet_id,
                 status=norm_status,
                 rating=rating,
                 scene_tag=str(scene_tag).strip() if scene_tag is not None else None,
+                genre_id=str(target_genre).strip() if target_genre is not None else None,
             )
             results.append(updated)
             if norm_status == "approved":
@@ -344,7 +418,7 @@ def save_craft_items(
                 raise ValueError("raw_text 不能为空")
             saved_dialogues.append(
                 save_dialogue_snippet(
-                    genre_id=gid,
+                    genre_id=str(d.get("genre_id") or gid).strip() or gid,
                     raw_text=raw_text,
                     work_id=d.get("work_id") or wid,
                     chapter_num=d.get("chapter_num"),

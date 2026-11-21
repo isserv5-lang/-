@@ -5,31 +5,33 @@
 ## 最新记忆胶囊
 
 ```markdown
-[记忆胶囊] (2026-11-18 06:22)
-- 项目目标：本地优先的跨 AI 编剧知识库已完成 **Antigravity 暗黑交互图谱 + 三频平台标签体系（v2）** 升级、全链路回归验收、正式库平滑升级与 8765 端口热更新部署。
-- 关键入口：
-  - 可视化图谱工作台：`http://127.0.0.1:8765`（或双击 `D:\ScreenwriterKB\打开可视化知识库.cmd` / `screenwriter-kb\启动可视化面板.cmd`）
-  - 聚合与拖拽接口：`GET /api/graph/universe`、`POST /api/upload-novel`
-  - CLI：`uv run --python 3.12 swkb [mcp|web|import|lock-check|stats|init]`
-  - 测试：`uv run --python 3.12 pytest -v`（目录 `screenwriter-kb/`）
+[记忆胶囊] (2026-11-21 20:54)
+- 项目目标：已完成 **D 盘全迁与「一书多标签 + 单梗精准归位防串味」（v3）** 全链路升级、自动化验收、正式库升级、三端 MCP 路径切换至 D 盘、8765 热重启与 GitHub 同步。
+- 权威路径与关键入口：
+  - 唯一权威项目路径：`D:\Antigravity\zahuo-repo\screenwriter-kb`（Git 根：`D:\Antigravity\zahuo-repo`）
+  - 可视化多标签星图工作台：`http://127.0.0.1:8765`（已由 D 盘 `.venv` 热重启，或双击 `D:\ScreenwriterKB\打开可视化知识库.cmd`）
+  - 多标签核心接口：`GET /api/graph/universe`（含 `work_tag_links`）、`PUT/GET /api/works/{work_id}/tags`、`POST /api/upload-novel`（支持 `extra_genre_ids` & `auto_detect_tags`）、`POST /api/snippets/{id}/review` & `POST /api/dialogues/{id}/review`（支持 `genre_id` 防串味归位）
+  - 测试：`uv run --python 3.12 pytest -v`（需配置 `$env:UV_CACHE_DIR="D:\ScreenwriterKB\.uv-cache"`、`$env:TEMP="D:\ScreenwriterKB\.tmp"`）
 - 当前状态：
-  - [✓] `src/swkb/taxonomy.py` 沉淀三大主频（`女频` 16 / `男频` 15 / `通用` 14，共 45 个番茄/红果/QQ阅读真实标签）并完成 v1→v2 平滑迁移与 `mcp_server.py` / `web_api.py` 升级。
-  - [✓] `src/swkb/static/` 重写为全屏 `#090a0d` 哑光暗黑点阵 Antigravity 胶囊图谱（`◉ 知识星图 / ◎ 互动支线`），支持拖放 `.txt`/`.docx` 到标签节点直传、血脉聚光灯、400px 极简滑出试菜抽屉及 `🔒 精话锁` 浮层（零外部 CDN）。
-  - [✓] `tests/test_e2e.py` 已更新并 7/7 全绿通过（`7 passed`，覆盖三频 45 标签、v1→v2 平滑 `ALTER TABLE` 迁移、`/api/graph/universe`、`/api/upload-novel`、真实样本防盗坏章识别、试菜 ✓/✗ + FTS5、精话锁、8-gram 查重、互动影游死胡同诊断与 12 个 MCP 工具）。
-  - [✓] `D:\ScreenwriterKB` 已通过 `scripts/connect_ai_clients.py` 完成平滑升级（`works=0` 保持干净空库，3 主频 / 45 标签 / 26 精话锁规则 / 1 个 4 节点演示项目就位）；`127.0.0.1:8765` 已重启为新版服务并实测返回最新星图数据与暗黑前端页面。
-  - [~] 真实浏览器鼠标拖拽与三端桌面客户端 GUI 重启拉起 stdio MCP 交互仍待用户本机首次打开时人工目视体验。
+  - [✓] 后端多标签升级落地：`db.py` 幂等建表 `work_tags` 并自动回填旧库；`ingest.py` 内置 45 标签高频特征词自动识别 1~3 个副标签并按单段对白子标签分流；`repository.py` 实现 `set_work_tags`/`get_work_tags` 与试菜跨标签迁卡防串味；`web_api.py` 与 `mcp_server.py`（13 工具，新增 `update_work_tags`）全量对齐。
+  - [✓] 前端多标签动态星图落地：`src/swkb/static/` 实现主标签发光实线弧线 + 副标签虚线跨列弧线、悬停/点击跨频联动聚光灯、喂书浮层多标签点选 + AI 自动识别开关、书籍抽屉内联增删标签、试菜卡片右上角 `⇄` 一键切归属标签。
+  - [✓] E2E 测试 9/9 全绿通过（`9 passed`）：新增 `test_8`（多标签上传、PUT 增删签、双路由试菜跨签防串味、卡片隔离、`work_tag_links`、MCP `update_work_tags`）与 `test_9`（真实长篇《玄学小祖宗》自动识别多标签实测）。
+  - [✓] 正式库与三端 MCP 全切 D 盘：运行 `scripts/connect_ai_clients.py` 升级 `D:\ScreenwriterKB`（`work_tags` 表已就绪，保持 `works=0` 干净空库，45 标签 / 26 精话锁 / 1 演示项目）；核实 Codex / Claude Desktop / Antigravity 三端配置与 `打开可视化知识库.cmd` 100% 指向 `D:/Antigravity/zahuo-repo/screenwriter-kb` 且注入 D 盘 `UV_CACHE_DIR`/`TEMP`，无旧 C 盘路径残留。
+  - [✓] `127.0.0.1:8765` 已基于 D 盘虚拟环境重启，实测 `/api/graph/universe`、`/`、`/static/app.js` 均返回 200 OK 且包含 `work_tag_links` 与多标签前端代码。
+  - [~] 真实桌面浏览器鼠标悬停多连线动效与三端客户端 GUI 重启拉起新 D 盘 stdio MCP 仍待用户本机实际打开体验。
 - 关键决策与禁区：
-  - [!] 正式库在 `D:\ScreenwriterKB`，测试与开发必须用 `SWKB_DATA_DIR` 或临时 `db_path` 隔离，绝不污染正式库或提交版权小说到 Git。
-  - [!] 保留原标签 ID `mengwa`、`shoushi`、`chongsheng`、`xuanyi`、`hudong`；旧默认空抽屉 `dushi`/`guyan` 自动迁移至 `dushi_naodong`/`gongdou`。
-  - [!] 所有 `.cmd` 启动脚本必须保持 CRLF 换行 + UTF-8 无 BOM。
+  - [!] 严禁写回旧 C 盘路径（`C:\Users\visser\Downloads\ZaHuo\...`）；所有 `uv` 命令均应指向 D 盘缓存目录。
+  - [!] 一书可跨多标签连线（`work_tags`），但单条对白严格归属单一抽屉（`dialogue_snippets.genre_id`），彻底杜绝多题材串味。
+  - [!] 正式库在 `D:\ScreenwriterKB`，测试与开发必须用 `SWKB_DATA_DIR` 隔离；所有 `.cmd` 脚本保持 CRLF + UTF-8 无 BOM。
 - 下一步待办：
-  1. 用户直接在浏览器刷新 `http://127.0.0.1:8765` 即可体验新版 Antigravity 暗黑知识星图，并把 `.txt`/`.docx` 小说直接拖到对应标签胶囊上传。
-  2. 重启 Codex / Claude Desktop / Antigravity 后可通过升级后的 `kb_overview_and_drawers` 查看三大频与 45 个精准标签。
-- 核心上下文：swkb.taxonomy, swkb.db, swkb.repository, swkb.web_api, swkb.mcp_server, swkb.static/app.js, novel-craft-feeder
+  1. 浏览器刷新 `http://127.0.0.1:8765` 体验新版一书多连线星图，试传一本多题材小说验证自动多标签连线与试菜 `⇄` 分流。
+  2. 重启 Codex / Claude Desktop / Antigravity 生效新的 D 盘 MCP 路径与 `update_work_tags` 工具。
+- 核心上下文：swkb.db, swkb.ingest, swkb.repository, swkb.web_api, swkb.mcp_server, swkb.static/app.js, scripts/connect_ai_clients.py, tests/test_e2e.py
 ```
 
 ---
 
 ## 阶段演进归档（倒序精简）
+- **2026-11-21 (v3)**：项目全面迁至 D 盘（`D:\Antigravity\zahuo-repo\screenwriter-kb`）并落地「一书多标签 + 单梗精准归位防串味」（`work_tags` 表、45 标签自动识别与单梗分流、`PUT /api/works/{id}/tags`、双路由试菜切签、`work_tag_links` 跨列弧线图谱、13 个 MCP 工具），E2E 9/9 全绿、三端 MCP 路径切换 D 盘、8765 重启验收并推送 GitHub。
 - **2026-11-18 (v2)**：升级番茄/红果/QQ阅读三频 45 标签体系（`taxonomy.py`）、`ALTER TABLE` 平滑迁移、`GET /api/graph/universe` 与 `POST /api/upload-novel`、Antigravity 风格纯黑动态交互图谱前端、E2E 7/7 回归通过及本机正式库/8765 服务刷新。
 - **2026-11-18 (v1)**：完成 `screenwriter-kb` 首版核心引擎、多题材知识库与互动影游画布、FastAPI 可视化工作台、12 个 stdio MCP 工具、`novel-craft-feeder` Skill、7 项 E2E 测试验收、三端连接脚本执行及跨 AI 记忆胶囊归档。

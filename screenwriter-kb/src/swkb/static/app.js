@@ -83,6 +83,7 @@
       channels: [],
       tags: [],
       works: [],
+      work_tag_links: [],
     },
     expandedChannels: new Set(['女频', '男频', '通用']),
     expandedTagIds: new Set(),
@@ -102,13 +103,60 @@
     // 精话锁规则
     jinghuaRules: [],
 
-    // 待上传文件（从顶部按钮或拖到空白画布时暂存）
+    // 待上传文件与多标签草稿（从顶部按钮、抽屉按钮或拖放到标签上时暂存）
     pendingUploadFile: null,
     feedTargetGenreId: null,
+    uploadDraft: {
+      primaryTagId: null,
+      extraTagIds: [],
+      autoDetect: true,
+    },
 
     // 视图平移缩放
     view: { x: 0, y: 0, scale: 1 },
   };
+
+  function getTagById(tagId) {
+    if (!tagId) return null;
+    return (state.universe.tags || []).find((t) => t.id === tagId) || null;
+  }
+
+  function getTagName(tagId) {
+    return getTagById(tagId)?.name || tagId || '未分类';
+  }
+
+  function getTagColor(tagId) {
+    const t = getTagById(tagId);
+    return t ? (CHANNEL_COLORS[t.channel] || '#7dd3fc') : '#7dd3fc';
+  }
+
+  function getWorkTagIds(work) {
+    if (!work) return [];
+    const ordered = [];
+    const seen = new Set();
+    const pushId = (id) => {
+      if (id && !seen.has(id)) {
+        seen.add(id);
+        ordered.push(id);
+      }
+    };
+    if (work.genre_id) pushId(work.genre_id);
+    if (Array.isArray(work.tag_ids)) {
+      work.tag_ids.forEach(pushId);
+    }
+    for (const link of state.universe.work_tag_links || []) {
+      if (link.work_id === work.id && link.tag_id) {
+        if (link.is_primary) {
+          // ensure primary stays first if work.genre_id was absent
+          if (!ordered.includes(link.tag_id)) ordered.unshift(link.tag_id);
+          seen.add(link.tag_id);
+        } else {
+          pushId(link.tag_id);
+        }
+      }
+    }
+    return ordered;
+  }
 
   // -------------------------------------------------------------------------
   // 物理弹簧模拟 & SVG 图谱渲染引擎
@@ -166,12 +214,17 @@
       return found ? { ...dc, ...found } : dc;
     });
 
-    // 统计各标签与各频道的数据
-    const worksByGenre = new Map();
+    // 统计各标签关联的所有书籍（含主标签与副标签，用于计数与搜索命中）
+    const worksByAnyTag = new Map();
+    const workTagIdsMap = new Map();
     for (const w of works || []) {
-      const gid = w.genre_id || 'common';
-      if (!worksByGenre.has(gid)) worksByGenre.set(gid, []);
-      worksByGenre.get(gid).push(w);
+      const allIds = getWorkTagIds(w);
+      if (allIds.length === 0) allIds.push(w.genre_id || 'common');
+      workTagIdsMap.set(w.id, allIds);
+      for (const gid of allIds) {
+        if (!worksByAnyTag.has(gid)) worksByAnyTag.set(gid, []);
+        worksByAnyTag.get(gid).push(w);
+      }
     }
 
     const totalWorks = root?.total_works ?? (works || []).length;
@@ -292,7 +345,8 @@
           const tx = chCenterX - rowSpan / 2 + c * cellW + (r % 2 === 1 ? 8 : -8);
           const ty = curY + r * rowH + 14;
 
-          const worksCnt = tag.works_count || (worksByGenre.get(tag.id) || []).length;
+          const tagWorks = worksByAnyTag.get(tag.id) || [];
+          const worksCnt = Math.max(tag.works_count || 0, tagWorks.length);
           const approvedCnt = tag.approved_count || 0;
           const pendingCnt = tag.pending_count || 0;
           const populated = worksCnt > 0 || approvedCnt > 0 || pendingCnt > 0 || (tag.characters_count || 0) > 0;
@@ -300,7 +354,6 @@
             ? `${approvedCnt}`
             : (pendingCnt > 0 ? `待${pendingCnt}` : (worksCnt > 0 ? `${worksCnt}书` : ''));
 
-          const tagWorks = worksByGenre.get(tag.id) || [];
           const hitSelf = q && (
             state.searchHitGenreIds.has(tag.id) ||
             (tag.name || '').toLowerCase().includes(q) ||
@@ -342,58 +395,96 @@
             dashed: !populated,
             curveBias: (c - 1) * 14,
           });
-
-          // 3 层：若该标签展开（或搜索直接命中旗下书名/台词梗），在其下方生长出《书名》胶囊
-          const workHit = q && tagWorks.some((w) => (w.title || '').toLowerCase().includes(q) || state.searchHitWorkIds.has(w.id));
-          if ((state.expandedTagIds.has(tag.id) || workHit) && tagWorks.length > 0) {
-            const wGap = 158;
-            const wSpan = (tagWorks.length - 1) * wGap;
-            tagWorks.forEach((w, wIdx) => {
-              const wx = tx - wSpan / 2 + wIdx * wGap;
-              const wy = ty + 78 + (wIdx % 2) * 18;
-              const wId = `work:${w.id}`;
-              const wTitle = `《${truncatePillText(w.title, 8)}》`;
-              const cleanCh = w.clean_chapters ?? 0;
-              const corrCh = w.corrupted_chapters ?? 0;
-              const wBadge = corrCh > 0 ? `${cleanCh}净/${corrCh}防` : `${cleanCh}章`;
-
-              nextNodes.set(wId, {
-                id: wId,
-                kind: 'work',
-                workId: w.id,
-                genreId: tag.id,
-                title: wTitle,
-                fullTitle: w.title,
-                badge: wBadge,
-                tx: wx,
-                ty: wy,
-                width: measurePillWidth(wTitle, wBadge, false),
-                height: 32,
-                populated: true,
-                hasHalo: false,
-                dotColor: corrCh > 0 ? '#fbbf24' : '#7dd3fc',
-                pendingCount: 0,
-                searchHit: q ? ((w.title || '').toLowerCase().includes(q) || state.searchHitWorkIds.has(w.id)) : false,
-                parentId: tagNodeId,
-                raw: w,
-              });
-
-              nextEdges.push({
-                id: `e:${tagNodeId}->${wId}`,
-                from: tagNodeId,
-                to: wId,
-                weight: Math.max(1, Math.min(8, Math.round(cleanCh / 3))),
-                weightLabel: cleanCh > 0 ? String(cleanCh) : '',
-                dashed: false,
-                curveBias: (wIdx - (tagWorks.length - 1) / 2) * 12,
-              });
-            });
-          }
         });
 
         curY += rowsCount * rowH + 46;
       });
     });
+
+    // 3 层：一书多标签动态渲染 —— 书本胶囊位于主标签下方，主标签实线弧线 + 副标签柔和半透明虚线跨列弧线
+    const worksByAnchor = new Map();
+    for (const w of works || []) {
+      const allIds = workTagIdsMap.get(w.id) || [w.genre_id || 'common'];
+      const primaryId = w.genre_id || allIds[0];
+      const workHit = q && ((w.title || '').toLowerCase().includes(q) || state.searchHitWorkIds.has(w.id));
+      const anyTagExpanded = allIds.some((tid) => state.expandedTagIds.has(tid));
+      if (!anyTagExpanded && !workHit) continue;
+
+      let anchorTagId = null;
+      if (nextNodes.has(`tag:${primaryId}`)) {
+        anchorTagId = primaryId;
+      } else {
+        anchorTagId = allIds.find((tid) => nextNodes.has(`tag:${tid}`) && (state.expandedTagIds.has(tid) || workHit))
+          || allIds.find((tid) => nextNodes.has(`tag:${tid}`))
+          || null;
+      }
+      if (!anchorTagId) continue;
+
+      if (!worksByAnchor.has(anchorTagId)) worksByAnchor.set(anchorTagId, []);
+      worksByAnchor.get(anchorTagId).push({ work: w, allIds, primaryId });
+    }
+
+    for (const [anchorTagId, entries] of worksByAnchor.entries()) {
+      const anchorNode = nextNodes.get(`tag:${anchorTagId}`);
+      if (!anchorNode) continue;
+      const wGap = 166;
+      const wSpan = (entries.length - 1) * wGap;
+
+      entries.forEach(({ work: w, allIds, primaryId }, wIdx) => {
+        const wx = anchorNode.tx - wSpan / 2 + wIdx * wGap;
+        const wy = anchorNode.ty + 78 + (wIdx % 2) * 18;
+        const wId = `work:${w.id}`;
+        const wTitle = `《${truncatePillText(w.title, 8)}》`;
+        const cleanCh = w.clean_chapters ?? 0;
+        const corrCh = w.corrupted_chapters ?? 0;
+        const multiSuffix = allIds.length > 1 ? `·${allIds.length}签` : '';
+        const wBadge = (corrCh > 0 ? `${cleanCh}净/${corrCh}防` : `${cleanCh}章`) + multiSuffix;
+
+        nextNodes.set(wId, {
+          id: wId,
+          kind: 'work',
+          workId: w.id,
+          genreId: primaryId,
+          tagIds: allIds,
+          title: wTitle,
+          fullTitle: w.title,
+          badge: wBadge,
+          tx: wx,
+          ty: wy,
+          width: measurePillWidth(wTitle, wBadge, false),
+          height: 32,
+          populated: true,
+          hasHalo: false,
+          dotColor: corrCh > 0 ? '#fbbf24' : '#7dd3fc',
+          pendingCount: w.pending_count || 0,
+          searchHit: q ? ((w.title || '').toLowerCase().includes(q) || state.searchHitWorkIds.has(w.id)) : false,
+          parentId: `tag:${anchorTagId}`,
+          raw: w,
+        });
+
+        // 为该书所有可见的归属标签绘制连线：主标签实线发光，副标签柔和半透明虚线跨列弧线
+        allIds.forEach((tid, tIdx) => {
+          const tNodeId = `tag:${tid}`;
+          const tNode = nextNodes.get(tNodeId);
+          if (!tNode) return;
+          const isPrimary = tid === primaryId;
+          const dxSign = tNode.tx === wx ? 0 : (wx > tNode.tx ? -1 : 1);
+          nextEdges.push({
+            id: isPrimary ? `e:${tNodeId}->${wId}` : `e:sec:${tNodeId}->${wId}`,
+            from: tNodeId,
+            to: wId,
+            weight: isPrimary ? Math.max(2, Math.min(8, Math.round(cleanCh / 3))) : 1,
+            weightLabel: isPrimary && cleanCh > 0 ? String(cleanCh) : '',
+            dashed: !isPrimary,
+            isPrimaryWorkEdge: isPrimary,
+            isSecondaryWorkEdge: !isPrimary,
+            curveBias: isPrimary
+              ? (wIdx - (entries.length - 1) / 2) * 12
+              : dxSign * (32 + (tIdx % 3) * 18),
+          });
+        });
+      });
+    }
 
     applyLayoutTargets(nextNodes, nextEdges, nextBoxes);
   }
@@ -492,6 +583,7 @@
         prev.raw = spec.raw;
         prev.kind = spec.kind;
         prev.genreId = spec.genreId;
+        prev.tagIds = spec.tagIds;
         prev.workId = spec.workId;
         prev.channelName = spec.channelName;
         prev.storyNodeId = spec.storyNodeId;
@@ -553,15 +645,24 @@
     edgeDomMap.clear();
     for (const edge of simEdges) {
       const g = svgEl('g', { class: 'edge-group', 'data-edge-id': edge.id });
-      const strokeW = edge.dashed ? 1.15 : (1.35 + Math.min(3.3, Math.log2((edge.weight || 1) + 1) * 0.95));
-      const markerEnd = edge.isGood
-        ? 'url(#arrow-good)'
-        : edge.isBad
-          ? 'url(#arrow-bad)'
-          : 'url(#arrow-muted)';
+      const strokeW = edge.isSecondaryWorkEdge
+        ? 1.25
+        : edge.isPrimaryWorkEdge
+          ? 1.85
+          : (edge.dashed ? 1.15 : (1.35 + Math.min(3.3, Math.log2((edge.weight || 1) + 1) * 0.95)));
+      const markerEnd = edge.isSecondaryWorkEdge
+        ? 'none'
+        : edge.isGood
+          ? 'url(#arrow-good)'
+          : edge.isBad
+            ? 'url(#arrow-bad)'
+            : 'url(#arrow-muted)';
 
+      const workEdgeClass = edge.isPrimaryWorkEdge
+        ? 'is-work-primary'
+        : (edge.isSecondaryWorkEdge ? 'is-work-secondary' : '');
       const path = svgEl('path', {
-        class: `edge-path ${edge.dashed ? 'is-dashed' : 'is-populated'} ${edge.isGood ? 'is-good' : ''} ${edge.isBad ? 'is-bad' : ''}`,
+        class: `edge-path ${edge.dashed ? 'is-dashed' : 'is-populated'} ${workEdgeClass} ${edge.isGood ? 'is-good' : ''} ${edge.isBad ? 'is-bad' : ''}`,
         'stroke-width': strokeW.toFixed(2),
         'marker-end': markerEnd,
       });
@@ -699,32 +800,69 @@
   function computeBezier(a, b, edge) {
     const dx = b.x - a.x;
     const dy = b.y - a.y;
-    const vertical = Math.abs(dy) >= Math.abs(dx) * 0.45;
 
     let sx, sy, ex, ey, c1x, c1y, c2x, c2y;
-    if (vertical) {
-      const sign = dy >= 0 ? 1 : -1;
-      sx = a.x;
-      sy = a.y + sign * (a.height / 2 + 1);
-      ex = b.x;
-      ey = b.y - sign * (b.height / 2 + 4);
-      const spanY = Math.max(36, Math.abs(ey - sy) * 0.52);
+    if (edge.isSecondaryWorkEdge) {
       const bias = edge.curveBias || 0;
-      c1x = sx + bias;
-      c1y = sy + sign * spanY;
-      c2x = ex - bias * 0.5;
-      c2y = ey - sign * spanY;
+      if (dy >= 16) {
+        sx = a.x;
+        sy = a.y + a.height / 2 + 1;
+        ex = b.x;
+        ey = b.y - b.height / 2 - 4;
+        const arcY = Math.max(58, Math.abs(ey - sy) * 0.55);
+        c1x = sx + bias;
+        c1y = sy + arcY;
+        c2x = ex - bias * 0.5;
+        c2y = ey - arcY * 0.85;
+      } else if (Math.abs(dx) < 60) {
+        const side = (bias >= 0 ? 1 : -1);
+        sx = a.x + side * (a.width / 2 + 1);
+        sy = a.y;
+        ex = b.x + side * (b.width / 2 + 4);
+        ey = b.y;
+        const bulge = 64 + Math.min(40, Math.abs(bias));
+        c1x = sx + side * bulge;
+        c1y = sy;
+        c2x = ex + side * bulge;
+        c2y = ey;
+      } else {
+        const signX = dx >= 0 ? 1 : -1;
+        sx = a.x + signX * (a.width / 2 + 1);
+        sy = a.y;
+        ex = b.x - signX * (b.width / 2 + 4);
+        ey = b.y;
+        const arch = 56 + Math.abs(bias);
+        c1x = sx + signX * Math.max(45, Math.abs(ex - sx) * 0.35);
+        c1y = sy + arch;
+        c2x = ex - signX * Math.max(45, Math.abs(ex - sx) * 0.35);
+        c2y = ey + arch * 0.7;
+      }
     } else {
-      const sign = dx >= 0 ? 1 : -1;
-      sx = a.x + sign * (a.width / 2 + 1);
-      sy = a.y;
-      ex = b.x - sign * (b.width / 2 + 4);
-      ey = b.y;
-      const spanX = Math.max(40, Math.abs(ex - sx) * 0.5);
-      c1x = sx + sign * spanX;
-      c1y = sy + (edge.curveBias || 0);
-      c2x = ex - sign * spanX;
-      c2y = ey - (edge.curveBias || 0) * 0.4;
+      const vertical = Math.abs(dy) >= Math.abs(dx) * 0.45;
+      if (vertical) {
+        const sign = dy >= 0 ? 1 : -1;
+        sx = a.x;
+        sy = a.y + sign * (a.height / 2 + 1);
+        ex = b.x;
+        ey = b.y - sign * (b.height / 2 + 4);
+        const spanY = Math.max(36, Math.abs(ey - sy) * 0.52);
+        const bias = edge.curveBias || 0;
+        c1x = sx + bias;
+        c1y = sy + sign * spanY;
+        c2x = ex - bias * 0.5;
+        c2y = ey - sign * spanY;
+      } else {
+        const sign = dx >= 0 ? 1 : -1;
+        sx = a.x + sign * (a.width / 2 + 1);
+        sy = a.y;
+        ex = b.x - sign * (b.width / 2 + 4);
+        ey = b.y;
+        const spanX = Math.max(40, Math.abs(ex - sx) * 0.5);
+        c1x = sx + sign * spanX;
+        c1y = sy + (edge.curveBias || 0);
+        c2x = ex - sign * spanX;
+        c2y = ey - (edge.curveBias || 0) * 0.4;
+      }
     }
 
     const d = `M ${sx.toFixed(1)} ${sy.toFixed(1)} C ${c1x.toFixed(1)} ${c1y.toFixed(1)}, ${c2x.toFixed(1)} ${c2y.toFixed(1)}, ${ex.toFixed(1)} ${ey.toFixed(1)}`;
@@ -845,14 +983,16 @@
   }
 
   function refreshHighlightClasses() {
-    const hoverId = state.hoveredNodeId;
+    const focusId = state.hoveredNodeId || (state.selectedNodeId && state.selectedNodeId.startsWith('work:') ? state.selectedNodeId : null);
     const hasSearch = state.searchQuery.trim().length > 0;
-    const lineage = hoverId ? getLineageSet(hoverId) : null;
+    const lineage = focusId ? getLineageSet(focusId) : null;
 
     for (const [id, g] of nodeDomMap.entries()) {
       const node = simNodes.get(id);
       const isSelected = state.selectedNodeId === id;
+      const isLit = Boolean(lineage && lineage.activeNodes.has(id) && id !== focusId);
       g.classList.toggle('is-selected', isSelected);
+      g.classList.toggle('is-lineage-lit', isLit);
       g.classList.toggle('is-search-hit', Boolean(node?.searchHit));
 
       const halo = g.querySelector('.node-halo');
@@ -876,6 +1016,8 @@
       item.path.classList.toggle('is-highlight', active);
       if (active) {
         item.path.setAttribute('marker-end', 'url(#arrow-active)');
+      } else if (item.edge.isSecondaryWorkEdge) {
+        item.path.setAttribute('marker-end', 'none');
       } else {
         const m = item.edge.isGood ? 'url(#arrow-good)' : item.edge.isBad ? 'url(#arrow-bad)' : 'url(#arrow-muted)';
         item.path.setAttribute('marker-end', m);
@@ -1213,22 +1355,60 @@
     }
   }
 
-  function renderSnippetCardHtml(sn, isPending) {
+  function resolveSnippetWorkTags(sn, workTagsOverride = null) {
+    const base = [];
+    const seen = new Set();
+    const pushId = (id) => {
+      if (id && !seen.has(id)) {
+        seen.add(id);
+        base.push(id);
+      }
+    };
+    if (Array.isArray(workTagsOverride) && workTagsOverride.length) {
+      workTagsOverride.forEach(pushId);
+    } else if (sn.work_id) {
+      const workObj = (state.universe.works || []).find((w) => w.id === sn.work_id);
+      if (workObj) getWorkTagIds(workObj).forEach(pushId);
+    }
+    if (sn.genre_id) pushId(sn.genre_id);
+    return base;
+  }
+
+  function renderSnippetCardHtml(sn, isPending, workTagsOverride = null) {
     const hasRef = sn.work_id && sn.chapter_num != null;
     const refLabel = hasRef ? `第${sn.chapter_num}章 L${sn.line_start || 1}` : '手工摘录';
+    const currentGid = sn.genre_id || 'mengwa';
+    const workTags = resolveSnippetWorkTags(sn, workTagsOverride);
+    const canSwitch = isPending && workTags.length > 1;
+    const tagName = getTagName(currentGid);
+    const tagColor = getTagColor(currentGid);
+
     return `
-      <div class="glass-card ${isPending ? 'is-pending-card' : ''}" data-snippet-id="${escHtml(sn.id)}">
+      <div class="glass-card ${isPending ? 'is-pending-card' : ''}" data-snippet-id="${escHtml(sn.id)}" data-orig-genre-id="${escHtml(currentGid)}">
+        <div class="card-top-row">
+          <span class="badge-pill">${escHtml(sn.scene_tag || (isPending ? '待试菜' : '好梗'))}</span>
+          <button
+            class="snippet-tag-pill ${canSwitch ? 'is-switchable' : ''}"
+            type="button"
+            data-genre-id="${escHtml(currentGid)}"
+            data-work-tags="${escHtml(workTags.join(','))}"
+            title="${canSwitch ? '点击在本书多个标签间一键切换归属，防止串味' : '当前归属标签'}"
+          >
+            <span class="tag-dot" style="background:${tagColor}"></span>
+            <span class="snippet-tag-name">${escHtml(tagName)}</span>
+            ${canSwitch ? '<span class="snippet-tag-cycle">⇄</span>' : ''}
+          </button>
+        </div>
         <div class="quote-text">${escHtml(sn.raw_text)}</div>
         ${sn.why_funny_or_effective ? `<div class="muted-text">${escHtml(sn.why_funny_or_effective)}</div>` : ''}
         <div class="card-meta-row">
-          <span class="badge-pill">${escHtml(sn.scene_tag || (isPending ? '待试菜' : '好梗'))}</span>
           ${hasRef
             ? `<button class="span-link-btn" type="button" data-work-id="${escHtml(sn.work_id)}" data-ch="${sn.chapter_num}" data-ls="${sn.line_start || 1}" data-le="${sn.line_end || sn.line_start || 1}">${refLabel} · 核对原文</button>`
             : `<span class="muted-text">${refLabel}</span>`}
         </div>
         ${isPending ? `
           <div class="taste-btn-row">
-            <button class="btn-taste-yes" type="button" data-action="approve">✓ 对味留用</button>
+            <button class="btn-taste-yes" type="button" data-action="approve">✓ 留</button>
             <button class="btn-taste-no" type="button" data-action="reject">✗ 淘汰</button>
           </div>` : ''}
       </div>
@@ -1236,7 +1416,29 @@
   }
 
   function bindDrawerSnippetEvents(container, onReviewed) {
+    if (container.dataset.snippetBound === '1') return;
+    container.dataset.snippetBound = '1';
+
     container.addEventListener('click', async (ev) => {
+      const switchBtn = ev.target.closest('.snippet-tag-pill.is-switchable');
+      if (switchBtn) {
+        const tags = (switchBtn.dataset.workTags || '').split(',').filter(Boolean);
+        if (tags.length > 1) {
+          const cur = switchBtn.dataset.genreId;
+          const curIdx = tags.indexOf(cur);
+          const nextGid = tags[(curIdx + 1) % tags.length];
+          switchBtn.dataset.genreId = nextGid;
+          const nameEl = switchBtn.querySelector('.snippet-tag-name');
+          const dotEl = switchBtn.querySelector('.tag-dot');
+          if (nameEl) nameEl.textContent = getTagName(nextGid);
+          if (dotEl) dotEl.style.background = getTagColor(nextGid);
+          switchBtn.classList.remove('is-pulsing');
+          void switchBtn.offsetWidth;
+          switchBtn.classList.add('is-pulsing');
+        }
+        return;
+      }
+
       const spanBtn = ev.target.closest('.span-link-btn');
       if (spanBtn) {
         await toggleInlineSpan(
@@ -1253,16 +1455,27 @@
       if (tasteBtn) {
         const card = tasteBtn.closest('.glass-card');
         const sid = card.dataset.snippetId;
+        const origGid = card.dataset.origGenreId;
+        const chosenGid = card.querySelector('.snippet-tag-pill')?.dataset.genreId || origGid;
         const status = tasteBtn.dataset.action === 'approve' ? 'approved' : 'rejected';
         tasteBtn.disabled = true;
         try {
           await api(`/api/snippets/${sid}/review`, {
             method: 'POST',
-            body: { status, rating: status === 'approved' ? 5 : 1 },
+            body: {
+              status,
+              rating: status === 'approved' ? 5 : 1,
+              genre_id: chosenGid || undefined,
+            },
           });
           card.classList.add('is-leaving');
           setTimeout(() => card.remove(), 240);
-          toast(status === 'approved' ? '已收入好梗库' : '已淘汰该片段', 'ok');
+          if (status === 'approved') {
+            const switched = chosenGid && chosenGid !== origGid;
+            toast(switched ? `已归入【${getTagName(chosenGid)}】好梗库` : `已收入【${getTagName(chosenGid)}】好梗库`, 'ok');
+          } else {
+            toast('已淘汰该片段', 'ok');
+          }
           await loadUniverse(false);
           if (onReviewed) onReviewed();
         } catch (err) {
@@ -1336,7 +1549,9 @@
       const approved = approvedRes.items || [];
       const chars = charsRes.items || [];
       const highlights = hlRes.items || [];
-      const tagWorks = (state.universe.works || []).filter((w) => w.genre_id === tag.id);
+      const tagWorks = (state.universe.works || []).filter(
+        (w) => w.genre_id === tag.id || getWorkTagIds(w).includes(tag.id)
+      );
 
       drawerBody.innerHTML = `
         ${tag.description ? `<div class="drawer-desc">${escHtml(tag.description)}${tag.channel_hint ? ` · 对白风味：${escHtml(tag.channel_hint)}` : ''}</div>` : ''}
@@ -1394,17 +1609,22 @@
         ${tagWorks.length ? `
           <div class="drawer-section">
             <div class="section-label-row"><span>归属书籍（防盗隔离状态）</span><span>${tagWorks.length} 本</span></div>
-            ${tagWorks.map((w) => `
+            ${tagWorks.map((w) => {
+              const isPrimaryInTag = w.genre_id === tag.id;
+              return `
               <div class="glass-card work-jump-card" data-work-id="${escHtml(w.id)}" style="cursor:pointer;">
                 <div class="card-meta-row">
                   <strong>《${escHtml(w.title)}》</strong>
-                  <span class="badge-pill badge-clean">干净 ${w.clean_chapters ?? 0} 章</span>
+                  <div style="display:inline-flex;gap:5px;align-items:center;">
+                    <span class="badge-pill">${isPrimaryInTag ? '主标签' : '副标签'}</span>
+                    <span class="badge-pill badge-clean">干净 ${w.clean_chapters ?? 0} 章</span>
+                  </div>
                 </div>
                 ${(w.corrupted_chapters ?? 0) > 0
                   ? `<div class="card-meta-row"><span class="badge-pill badge-corrupt">已隔离防盗乱码 ${w.corrupted_chapters} 章</span><span class="muted-text">点击查看</span></div>`
                   : `<div class="muted-text">全本干净无防盗乱码 · 点击查看章节与摘要</div>`}
-              </div>
-            `).join('')}
+              </div>`;
+            }).join('')}
           </div>
         ` : ''}
       `;
@@ -1418,7 +1638,32 @@
     }
   }
 
-  async function openWorkDrawer(workId) {
+  async function saveWorkTagsAndRefresh(workId, primaryTagId, extraTagIds, keepPickerOpen = false) {
+    try {
+      await api(`/api/works/${encodeURIComponent(workId)}/tags`, {
+        method: 'PUT',
+        body: {
+          primary_tag_id: primaryTagId,
+          extra_tag_ids: extraTagIds,
+        },
+      });
+      state.expandedTagIds.add(primaryTagId);
+      const pTag = getTagById(primaryTagId);
+      if (pTag) state.expandedChannels.add(pTag.channel || '通用');
+      for (const eid of extraTagIds) {
+        const eTag = getTagById(eid);
+        if (eTag) state.expandedChannels.add(eTag.channel || '通用');
+      }
+      state.selectedNodeId = `work:${workId}`;
+      await loadUniverse(false);
+      await openWorkDrawer(workId, keepPickerOpen);
+      toast('书籍标签已更新，星图连线已同步', 'ok');
+    } catch (err) {
+      toast(`标签更新失败：${err.message}`, 'err');
+    }
+  }
+
+  async function openWorkDrawer(workId, pickerOpen = false) {
     openDrawerShell({
       kicker: '<span class="badge-pill">作品档案</span>',
       title: '读取作品中...',
@@ -1438,13 +1683,62 @@
       const cleanCount = w.clean_chapters ?? chapters.filter((c) => !c.is_corrupted).length;
       const corruptCount = w.corrupted_chapters ?? chapters.filter((c) => c.is_corrupted).length;
 
+      const workTagIds = getWorkTagIds(w);
+      if (workTagIds.length === 0 && w.genre_id) workTagIds.push(w.genre_id);
+      const primaryTagId = workTagIds[0] || w.genre_id || 'mengwa';
+      const extraTagIds = workTagIds.slice(1);
+
       $('#drawer-title').textContent = `《${w.title}》`;
       $('#drawer-kicker').innerHTML = `
         <span class="badge-pill badge-clean">干净 ${cleanCount} 章</span>
         ${corruptCount > 0 ? `<span class="badge-pill badge-corrupt">已隔离防盗乱码 ${corruptCount} 章</span>` : ''}
       `;
 
+      const renderPickerPills = (filterText = '') => {
+        const q = filterText.trim().toLowerCase();
+        const allTags = (state.universe.tags || []).filter(
+          (t) => !q || (t.name || '').toLowerCase().includes(q) || (t.channel || '').toLowerCase().includes(q)
+        );
+        return allTags.map((t) => {
+          const isPrim = t.id === primaryTagId;
+          const isSec = extraTagIds.includes(t.id);
+          const cls = isPrim ? 'is-assigned-primary' : (isSec ? 'is-assigned-secondary' : '');
+          const mark = isPrim ? '<span class="tag-role-badge">主</span>' : (isSec ? '<span>✓</span>' : '');
+          return `
+            <button class="work-tag-pick-pill ${cls}" type="button" data-pick-tag-id="${escHtml(t.id)}">
+              <span style="color:${CHANNEL_COLORS[t.channel] || '#7dd3fc'}">●</span>
+              <span>${escHtml(t.name)}</span>
+              ${mark}
+            </button>
+          `;
+        }).join('');
+      };
+
       drawerBody.innerHTML = `
+        <div class="glass-card work-tags-card">
+          <div class="section-label-row">
+            <span>归属标签（${workTagIds.length}）</span>
+            <span class="muted-text">画布实线=主 · 虚线=副</span>
+          </div>
+          <div class="work-tags-bar">
+            <span class="work-tag-chip is-primary">
+              <span class="tag-role-badge">主</span>
+              <span>${escHtml(getTagName(primaryTagId))}</span>
+            </span>
+            ${extraTagIds.map((tid) => `
+              <span class="work-tag-chip is-secondary">
+                <span>${escHtml(getTagName(tid))}</span>
+                <button class="work-tag-remove" type="button" data-remove-tag-id="${escHtml(tid)}" title="移除副标签">×</button>
+              </span>
+            `).join('')}
+            <button id="btn-work-add-tag" class="btn-add-tag-mini" type="button">${pickerOpen ? '收起标签' : '+ 标签'}</button>
+          </div>
+          <div id="work-tag-picker" class="work-tag-picker ${pickerOpen ? '' : 'hidden'}">
+            <input id="work-tag-filter" class="dark-input" type="text" placeholder="过滤标签，点击增删副标签（最多5个副标签）..." autocomplete="off" />
+            <div id="work-tag-picker-grid" class="work-tag-picker-grid">${renderPickerPills('')}</div>
+          </div>
+        </div>
+
         ${w.summary_one_page ? `
           <div class="glass-card">
             <div class="section-label-row"><span>一页纸故事精简卡</span></div>
@@ -1455,14 +1749,14 @@
         ${pending.length ? `
           <div class="drawer-section">
             <div class="section-label-row"><span>本书待试菜新梗</span><span class="badge-pill badge-pending">${pending.length}</span></div>
-            ${pending.map((s) => renderSnippetCardHtml(s, true)).join('')}
+            ${pending.map((s) => renderSnippetCardHtml(s, true, workTagIds)).join('')}
           </div>
         ` : ''}
 
         <div class="drawer-section">
           <div class="section-label-row"><span>本书原话好梗</span><span>${approved.length}</span></div>
           ${approved.length
-            ? approved.map((s) => renderSnippetCardHtml(s, false)).join('')
+            ? approved.map((s) => renderSnippetCardHtml(s, false, workTagIds)).join('')
             : '<div class="muted-text">本书尚无已留用好梗，可在上方试菜确认</div>'}
         </div>
 
@@ -1495,6 +1789,48 @@
       `;
 
       bindDrawerSnippetEvents(drawerBody);
+
+      const addTagBtn = $('#btn-work-add-tag', drawerBody);
+      const pickerBox = $('#work-tag-picker', drawerBody);
+      const filterEl = $('#work-tag-filter', drawerBody);
+      const gridEl = $('#work-tag-picker-grid', drawerBody);
+
+      addTagBtn?.addEventListener('click', () => {
+        const willOpen = pickerBox.classList.contains('hidden');
+        pickerBox.classList.toggle('hidden', !willOpen);
+        addTagBtn.textContent = willOpen ? '收起标签' : '+ 标签';
+        if (willOpen) filterEl?.focus();
+      });
+
+      filterEl?.addEventListener('input', (ev) => {
+        gridEl.innerHTML = renderPickerPills(ev.target.value);
+      });
+
+      $$('.work-tag-remove', drawerBody).forEach((btn) => {
+        btn.addEventListener('click', async () => {
+          const rmId = btn.dataset.removeTagId;
+          const nextExtras = extraTagIds.filter((id) => id !== rmId);
+          await saveWorkTagsAndRefresh(workId, primaryTagId, nextExtras, false);
+        });
+      });
+
+      gridEl?.addEventListener('click', async (ev) => {
+        const pill = ev.target.closest('.work-tag-pick-pill');
+        if (!pill) return;
+        const tid = pill.dataset.pickTagId;
+        if (!tid || tid === primaryTagId) return;
+        let nextExtras;
+        if (extraTagIds.includes(tid)) {
+          nextExtras = extraTagIds.filter((id) => id !== tid);
+        } else {
+          if (extraTagIds.length >= 5) {
+            toast('单本书最多挂载 1 个主标签 + 5 个副标签', 'err');
+            return;
+          }
+          nextExtras = [...extraTagIds, tid];
+        }
+        await saveWorkTagsAndRefresh(workId, primaryTagId, nextExtras, true);
+      });
     } catch (err) {
       drawerBody.innerHTML = `<div class="empty-hint-box">${escHtml(err.message)}</div>`;
     }
@@ -1801,7 +2137,7 @@
   // -------------------------------------------------------------------------
   // 拖拽文件直接喂书 + 「+ 喂小说」按钮选择上传
   // -------------------------------------------------------------------------
-  async function uploadNovelFile(file, genreId) {
+  async function uploadNovelFile(file, genreId, extraGenreIds = [], autoDetectTags = true) {
     if (!file) return;
     const ext = (file.name.split('.').pop() || '').toLowerCase();
     if (!['txt', 'docx'].includes(ext)) {
@@ -1809,26 +2145,46 @@
       return;
     }
 
-    const tagObj = (state.universe.tags || []).find((t) => t.id === genreId);
+    const tagObj = getTagById(genreId);
     toast(`正在解析喂入【${tagObj ? tagObj.name : genreId}】：${file.name}...`);
 
     try {
       const form = new FormData();
       form.append('file', file);
       form.append('genre_id', genreId);
+      if (extraGenreIds.length > 0) {
+        form.append('extra_genre_ids', extraGenreIds.join(','));
+      }
+      form.append('auto_detect_tags', autoDetectTags ? 'true' : 'false');
+
       const res = await api('/api/upload-novel', { method: 'POST', body: form });
       const info = res.result || res;
+
+      const finalTagIds = Array.isArray(info.tag_ids) && info.tag_ids.length
+        ? info.tag_ids
+        : [genreId, ...extraGenreIds];
 
       if (tagObj) {
         state.expandedChannels.add(tagObj.channel || '通用');
         state.expandedTagIds.add(tagObj.id);
       }
+      for (const tid of finalTagIds) {
+        const t = getTagById(tid);
+        if (t) state.expandedChannels.add(t.channel || '通用');
+      }
 
       await loadUniverse(false);
       const corruptNote = info.corrupted_chapters > 0 ? `，已隔离防盗 ${info.corrupted_chapters} 章` : '';
-      toast(`入库成功：《${info.title}》（干净 ${info.clean_chapters} 章${corruptNote}，待试菜 ${info.pending_snippets_count ?? 0} 条）`, 'ok');
+      const tagNamesNote = finalTagIds.length > 1
+        ? ` · 多签[${finalTagIds.map((tid) => getTagName(tid)).join(' / ')}]`
+        : '';
+      toast(`入库成功：《${info.title}》（干净 ${info.clean_chapters} 章${corruptNote}，待试菜 ${info.pending_snippets_count ?? 0} 条${tagNamesNote}）`, 'ok');
 
-      if (tagObj) {
+      if (info.work_id) {
+        state.selectedNodeId = `work:${info.work_id}`;
+        refreshHighlightClasses();
+        await openWorkDrawer(info.work_id);
+      } else if (tagObj) {
         state.selectedNodeId = `tag:${tagObj.id}`;
         refreshHighlightClasses();
         await openTagDrawer(tagObj);
@@ -1838,21 +2194,74 @@
     }
   }
 
+  function renderUploadSelectedChips() {
+    const { primaryTagId, extraTagIds } = state.uploadDraft;
+    const chipsEl = $('#upload-selected-chips');
+    const confirmBtn = $('#upload-confirm-btn');
+
+    if (!primaryTagId) {
+      chipsEl.innerHTML = '<span class="muted-text">点击下方胶囊：第 1 个为主标签，可顺手点选 0~4 个副标签</span>';
+      confirmBtn.disabled = true;
+      return;
+    }
+
+    const parts = [];
+    parts.push(`
+      <span class="upload-sel-chip is-primary">
+        <span class="pill-role-badge">主</span>
+        <span>${escHtml(getTagName(primaryTagId))}</span>
+        <button class="upload-sel-remove" type="button" data-rm-role="primary" data-rm-id="${escHtml(primaryTagId)}" title="重选主标签">×</button>
+      </span>
+    `);
+    for (const eid of extraTagIds) {
+      parts.push(`
+        <span class="upload-sel-chip is-secondary">
+          <span class="pill-role-badge">副</span>
+          <span>${escHtml(getTagName(eid))}</span>
+          <button class="upload-sel-remove" type="button" data-rm-role="extra" data-rm-id="${escHtml(eid)}" title="移除副标签">×</button>
+        </span>
+      `);
+    }
+    if (extraTagIds.length < 4) {
+      parts.push(`<span class="muted-text">可再选 ${4 - extraTagIds.length} 个副标签</span>`);
+    }
+    chipsEl.innerHTML = parts.join('');
+    confirmBtn.disabled = false;
+  }
+
   function renderUploadTagPopover(filterText = '') {
     const q = filterText.trim().toLowerCase();
+    const { primaryTagId, extraTagIds } = state.uploadDraft;
     const list = (state.universe.tags || []).filter((t) =>
       !q || (t.name || '').toLowerCase().includes(q) || (t.channel || '').toLowerCase().includes(q)
     );
-    $('#upload-tag-list').innerHTML = list.map((t) => `
-      <button class="upload-tag-pill" type="button" data-gid="${escHtml(t.id)}">
-        <span style="color:${CHANNEL_COLORS[t.channel] || '#7dd3fc'}">●</span>
-        <span>${escHtml(t.channel)} · ${escHtml(t.name)}</span>
-      </button>
-    `).join('');
+    $('#upload-tag-list').innerHTML = list.map((t) => {
+      const isPrim = t.id === primaryTagId;
+      const isSec = extraTagIds.includes(t.id);
+      const cls = isPrim ? 'is-primary' : (isSec ? 'is-secondary' : '');
+      const roleBadge = isPrim
+        ? '<span class="pill-role-badge">主</span>'
+        : (isSec ? '<span class="pill-role-badge">副</span>' : '');
+      return `
+        <button class="upload-tag-pill ${cls}" type="button" data-gid="${escHtml(t.id)}">
+          <span style="color:${CHANNEL_COLORS[t.channel] || '#7dd3fc'}">●</span>
+          <span>${escHtml(t.channel)} · ${escHtml(t.name)}</span>
+          ${roleBadge}
+        </button>
+      `;
+    }).join('');
+    renderUploadSelectedChips();
   }
 
-  function openUploadTagPicker(file) {
+  function openUploadTagPicker(file, defaultPrimaryTagId = null) {
     state.pendingUploadFile = file;
+    state.uploadDraft = {
+      primaryTagId: defaultPrimaryTagId || null,
+      extraTagIds: [],
+      autoDetect: true,
+    };
+    const autoChk = $('#upload-auto-detect');
+    if (autoChk) autoChk.checked = true;
     $('#upload-file-name').textContent = `待导入文件：${file.name}`;
     $('#upload-tag-filter').value = '';
     renderUploadTagPopover('');
@@ -1864,7 +2273,6 @@
     const fileInput = $('#novel-file-input');
 
     $('#btn-feed-novel').addEventListener('click', () => {
-      // 如果当前已选中某个标签或书籍，直接喂到那个标签；否则先选文件再弹出极简标签选择器
       const selNode = state.selectedNodeId ? simNodes.get(state.selectedNodeId) : null;
       state.feedTargetGenreId = selNode?.genreId || null;
       fileInput.value = '';
@@ -1879,13 +2287,9 @@
     fileInput.addEventListener('change', () => {
       const file = fileInput.files && fileInput.files[0];
       if (!file) return;
-      if (state.feedTargetGenreId) {
-        const targetGid = state.feedTargetGenreId;
-        state.feedTargetGenreId = null;
-        uploadNovelFile(file, targetGid);
-      } else {
-        openUploadTagPicker(file);
-      }
+      const targetGid = state.feedTargetGenreId || null;
+      state.feedTargetGenreId = null;
+      openUploadTagPicker(file, targetGid);
     });
 
     $('#upload-popover-close').addEventListener('click', () => {
@@ -1897,16 +2301,62 @@
       renderUploadTagPopover(ev.target.value);
     });
 
+    $('#upload-auto-detect').addEventListener('change', (ev) => {
+      state.uploadDraft.autoDetect = Boolean(ev.target.checked);
+    });
+
+    $('#upload-selected-chips').addEventListener('click', (ev) => {
+      const rmBtn = ev.target.closest('.upload-sel-remove');
+      if (!rmBtn) return;
+      const role = rmBtn.dataset.rmRole;
+      const rmId = rmBtn.dataset.rmId;
+      if (role === 'primary') {
+        if (state.uploadDraft.extraTagIds.length > 0) {
+          state.uploadDraft.primaryTagId = state.uploadDraft.extraTagIds.shift();
+        } else {
+          state.uploadDraft.primaryTagId = null;
+        }
+      } else {
+        state.uploadDraft.extraTagIds = state.uploadDraft.extraTagIds.filter((id) => id !== rmId);
+      }
+      renderUploadTagPopover($('#upload-tag-filter').value);
+    });
+
     $('#upload-tag-list').addEventListener('click', (ev) => {
       const btn = ev.target.closest('.upload-tag-pill');
       if (!btn || !state.pendingUploadFile) return;
-      const file = state.pendingUploadFile;
-      state.pendingUploadFile = null;
-      $('#upload-tag-popover').classList.add('hidden');
-      uploadNovelFile(file, btn.dataset.gid);
+      const gid = btn.dataset.gid;
+      const draft = state.uploadDraft;
+      if (!draft.primaryTagId) {
+        draft.primaryTagId = gid;
+      } else if (draft.primaryTagId === gid) {
+        if (draft.extraTagIds.length > 0) {
+          draft.primaryTagId = draft.extraTagIds.shift();
+        } else {
+          draft.primaryTagId = null;
+        }
+      } else if (draft.extraTagIds.includes(gid)) {
+        draft.extraTagIds = draft.extraTagIds.filter((id) => id !== gid);
+      } else {
+        if (draft.extraTagIds.length >= 4) {
+          toast('顺手点选最多支持 4 个副标签', 'err');
+          return;
+        }
+        draft.extraTagIds.push(gid);
+      }
+      renderUploadTagPopover($('#upload-tag-filter').value);
     });
 
-    // 全屏拖拽文件直接投喂到对应标签胶囊
+    $('#upload-confirm-btn').addEventListener('click', () => {
+      const file = state.pendingUploadFile;
+      const { primaryTagId, extraTagIds, autoDetect } = state.uploadDraft;
+      if (!file || !primaryTagId) return;
+      state.pendingUploadFile = null;
+      $('#upload-tag-popover').classList.add('hidden');
+      uploadNovelFile(file, primaryTagId, extraTagIds, autoDetect);
+    });
+
+    // 全屏拖拽文件直接投喂到对应标签胶囊（自动选中主标签并允许顺手选副标签）
     let activeDropTagId = null;
     const hintBanner = $('#drop-hint-banner');
 
@@ -1972,11 +2422,7 @@
       clearDropHover();
 
       const file = ev.dataTransfer.files[0];
-      if (hitTag && hitTag.genreId) {
-        uploadNovelFile(file, hitTag.genreId);
-      } else {
-        openUploadTagPicker(file);
-      }
+      openUploadTagPicker(file, hitTag?.genreId || null);
     });
   }
 
@@ -1991,6 +2437,7 @@
         channels: data.channels || [],
         tags: data.tags || [],
         works: data.works || [],
+        work_tag_links: data.work_tag_links || [],
       };
       const lockCount = data.root?.enabled_jinghua_rules ?? data.root?.total_jinghua_rules;
       if (lockCount !== undefined) {

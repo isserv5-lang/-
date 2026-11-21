@@ -138,7 +138,12 @@ def _query_genres(conn: sqlite3.Connection) -> list[dict[str, Any]]:
         """
         SELECT
             g.*,
-            (SELECT COUNT(*) FROM works w WHERE w.genre_id = g.id) AS work_count,
+            (
+                SELECT COUNT(DISTINCT wt.work_id)
+                FROM work_tags wt
+                INNER JOIN works w ON w.id = wt.work_id
+                WHERE wt.tag_id = g.id
+            ) AS work_count,
             (SELECT COUNT(*) FROM dialogue_snippets d WHERE d.genre_id = g.id AND d.status = 'approved') AS approved_dialogue_count,
             (SELECT COUNT(*) FROM dialogue_snippets d WHERE d.genre_id = g.id AND d.status = 'pending') AS pending_dialogue_count,
             (SELECT COUNT(*) FROM characters c WHERE c.genre_id = g.id) AS character_count,
@@ -258,7 +263,12 @@ def upsert_genre(
             """
             SELECT
                 g.*,
-                (SELECT COUNT(*) FROM works w WHERE w.genre_id = g.id) AS work_count,
+                (
+                    SELECT COUNT(DISTINCT wt.work_id)
+                    FROM work_tags wt
+                    INNER JOIN works w ON w.id = wt.work_id
+                    WHERE wt.tag_id = g.id
+                ) AS work_count,
                 (SELECT COUNT(*) FROM dialogue_snippets d WHERE d.genre_id = g.id AND d.status = 'approved') AS approved_dialogue_count,
                 (SELECT COUNT(*) FROM dialogue_snippets d WHERE d.genre_id = g.id AND d.status = 'pending') AS pending_dialogue_count,
                 (SELECT COUNT(*) FROM characters c WHERE c.genre_id = g.id) AS character_count,
@@ -280,25 +290,218 @@ def upsert_genre(
 
 
 # ---------------------------------------------------------------------------
-# Works & Chapters (书架管理)
+# Works, Multi-Tag Associations & Chapters (书架与一书多标签管理)
 # ---------------------------------------------------------------------------
+
+MAX_TAGS_PER_WORK = 6
+
+
+def _normalize_tag_ids(raw: list[str] | tuple[str, ...] | str | None) -> list[str]:
+    """Normalize a list or comma-separated string of tag IDs into a deduplicated list."""
+    if raw is None:
+        return []
+    parts: list[str]
+    if isinstance(raw, str):
+        parts = re.split(r"[,，;；\s]+", raw.strip())
+    else:
+        parts = [str(item) for item in raw]
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for part in parts:
+        tid = part.strip()
+        if tid and tid not in seen:
+            seen.add(tid)
+            cleaned.append(tid)
+    return cleaned
+
+
+def _format_work_tag_row(row: sqlite3.Row) -> dict[str, Any]:
+    ch_name = _normalize_channel(row["channel"])
+    return {
+        "id": str(row["tag_id"]),
+        "name": str(row["name"] or row["tag_id"]),
+        "channel": ch_name,
+        "channel_id": _channel_id_for_name(ch_name),
+        "sub_group": str(row["sub_group"] or "题材主干"),
+        "is_primary": 1 if int(row["is_primary"] or 0) else 0,
+    }
+
+
+def _query_work_tags_conn(
+    conn: sqlite3.Connection,
+    work_id: str,
+    fallback_genre_id: str | None = None,
+) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT
+            wt.tag_id,
+            wt.is_primary,
+            g.name,
+            g.channel,
+            g.sub_group
+        FROM work_tags wt
+        LEFT JOIN genres g ON g.id = wt.tag_id
+        WHERE wt.work_id = ?
+        ORDER BY wt.is_primary DESC, wt.rowid ASC
+        """,
+        (work_id,),
+    ).fetchall()
+    tags = [_format_work_tag_row(r) for r in rows]
+    if not tags and fallback_genre_id and fallback_genre_id.strip():
+        gid = fallback_genre_id.strip()
+        g_row = conn.execute(
+            "SELECT id, name, channel, sub_group FROM genres WHERE id = ?",
+            (gid,),
+        ).fetchone()
+        ch_name = _normalize_channel(g_row["channel"] if g_row is not None else "通用")
+        tags = [
+            {
+                "id": gid,
+                "name": str(g_row["name"]) if g_row is not None else gid,
+                "channel": ch_name,
+                "channel_id": _channel_id_for_name(ch_name),
+                "sub_group": str(g_row["sub_group"] or "题材主干") if g_row is not None else "题材主干",
+                "is_primary": 1,
+            }
+        ]
+    return tags
+
+
+def _query_all_work_tags_map(conn: sqlite3.Connection) -> dict[str, list[dict[str, Any]]]:
+    rows = conn.execute(
+        """
+        SELECT
+            wt.work_id,
+            wt.tag_id,
+            wt.is_primary,
+            g.name,
+            g.channel,
+            g.sub_group
+        FROM work_tags wt
+        LEFT JOIN genres g ON g.id = wt.tag_id
+        ORDER BY wt.work_id ASC, wt.is_primary DESC, wt.rowid ASC
+        """
+    ).fetchall()
+    mapping: dict[str, list[dict[str, Any]]] = {}
+    for r in rows:
+        wid = str(r["work_id"])
+        mapping.setdefault(wid, []).append(_format_work_tag_row(r))
+    return mapping
+
+
+def _attach_tags_to_work(
+    work: dict[str, Any],
+    tags: list[dict[str, Any]],
+) -> dict[str, Any]:
+    work["tags"] = tags
+    work["tag_ids"] = [t["id"] for t in tags]
+    return work
+
+
+def get_work_tags(
+    work_id: str,
+    db_path: Path | str | None = None,
+) -> list[dict[str, Any]]:
+    """Return all tags associated with a work, ordered with the primary tag first."""
+    conn, _ = _open_conn(db_path)
+    try:
+        work_row = conn.execute(
+            "SELECT id, genre_id FROM works WHERE id = ?",
+            (work_id,),
+        ).fetchone()
+        if work_row is None:
+            return []
+        return _query_work_tags_conn(conn, work_id, fallback_genre_id=work_row["genre_id"])
+    finally:
+        conn.close()
+
+
+def set_work_tags(
+    work_id: str,
+    primary_tag_id: str,
+    extra_tag_ids: list[str] | None = None,
+    db_path: Path | str | None = None,
+) -> list[dict[str, Any]]:
+    """Update a work's primary genre_id and synchronize all primary/secondary rows in work_tags."""
+    wid = (work_id or "").strip()
+    primary = (primary_tag_id or "").strip()
+    if not wid:
+        raise ValueError("work_id 不能为空")
+    if not primary:
+        raise ValueError("主标签 primary_tag_id 不能为空")
+
+    extras = [
+        tid
+        for tid in _normalize_tag_ids(extra_tag_ids)
+        if tid != primary
+    ][: MAX_TAGS_PER_WORK - 1]
+
+    conn, _ = _open_conn(db_path)
+    try:
+        work_row = conn.execute("SELECT id FROM works WHERE id = ?", (wid,)).fetchone()
+        if work_row is None:
+            raise ValueError(f"找不到作品：{wid}")
+
+        now = utc_now_iso()
+        conn.execute(
+            "UPDATE works SET genre_id = ? WHERE id = ?",
+            (primary, wid),
+        )
+        conn.execute("DELETE FROM work_tags WHERE work_id = ?", (wid,))
+        conn.execute(
+            """
+            INSERT INTO work_tags (work_id, tag_id, is_primary, created_at)
+            VALUES (?, ?, 1, ?)
+            """,
+            (wid, primary, now),
+        )
+        for tid in extras:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO work_tags (work_id, tag_id, is_primary, created_at)
+                VALUES (?, ?, 0, ?)
+                """,
+                (wid, tid, now),
+            )
+        conn.commit()
+        return _query_work_tags_conn(conn, wid, fallback_genre_id=primary)
+    finally:
+        conn.close()
 
 
 def list_works(
     genre_id: str | None = None,
     db_path: Path | str | None = None,
 ) -> list[dict[str, Any]]:
-    """List imported works, optionally filtered by genre_id."""
+    """List imported works (including multi-tag details), optionally filtered by any linked tag."""
     conn, _ = _open_conn(db_path)
     try:
         if genre_id:
             rows = conn.execute(
-                "SELECT * FROM works WHERE genre_id = ? ORDER BY created_at DESC",
-                (genre_id,),
+                """
+                SELECT DISTINCT w.*
+                FROM works w
+                LEFT JOIN work_tags wt ON wt.work_id = w.id
+                WHERE w.genre_id = ? OR wt.tag_id = ?
+                ORDER BY w.created_at DESC
+                """,
+                (genre_id, genre_id),
             ).fetchall()
         else:
             rows = conn.execute("SELECT * FROM works ORDER BY created_at DESC").fetchall()
-        return [item for r in rows if (item := serialize_work(r)) is not None]
+
+        tags_map = _query_all_work_tags_map(conn)
+        works: list[dict[str, Any]] = []
+        for r in rows:
+            item = serialize_work(r)
+            if item is not None:
+                wid = str(item["id"])
+                w_tags = tags_map.get(wid) or _query_work_tags_conn(
+                    conn, wid, fallback_genre_id=item.get("genre_id")
+                )
+                works.append(_attach_tags_to_work(item, w_tags))
+        return works
     finally:
         conn.close()
 
@@ -307,7 +510,7 @@ def get_work_detail(
     work_id: str,
     db_path: Path | str | None = None,
 ) -> dict[str, Any] | None:
-    """Return full work metadata, chapter list, and clean/corrupted chapter statistics."""
+    """Return full work metadata, multi-tag info, chapter list, and clean/corrupted chapter statistics."""
     conn, _ = _open_conn(db_path)
     try:
         work_row = conn.execute("SELECT * FROM works WHERE id = ?", (work_id,)).fetchone()
@@ -315,6 +518,11 @@ def get_work_detail(
             return None
         work = serialize_work(work_row)
         assert work is not None
+
+        w_tags = _query_work_tags_conn(
+            conn, work_id, fallback_genre_id=work.get("genre_id")
+        )
+        _attach_tags_to_work(work, w_tags)
 
         chapter_rows = conn.execute(
             "SELECT * FROM chapters WHERE work_id = ? ORDER BY chapter_num ASC",
@@ -369,7 +577,10 @@ def update_work_summary(
         row = conn.execute("SELECT * FROM works WHERE id = ?", (work_id,)).fetchone()
         result = serialize_work(row)
         assert result is not None
-        return result
+        w_tags = _query_work_tags_conn(
+            conn, work_id, fallback_genre_id=result.get("genre_id")
+        )
+        return _attach_tags_to_work(result, w_tags)
     finally:
         conn.close()
 
@@ -386,6 +597,7 @@ def list_dialogue_snippets(
     scene_tag: str = "",
     limit: int = 30,
     db_path: Path | str | None = None,
+    work_id: str | None = None,
 ) -> list[dict[str, Any]]:
     """Query dialogue snippets with genre isolation, status filter, scene tag, and FTS5 search."""
     conn, _ = _open_conn(db_path)
@@ -397,6 +609,9 @@ def list_dialogue_snippets(
         if genre_id:
             conditions.append("ds.genre_id = ?")
             filter_params.append(genre_id)
+        if work_id:
+            conditions.append("ds.work_id = ?")
+            filter_params.append(work_id)
         if status and status != "all":
             conditions.append("ds.status = ?")
             filter_params.append(status)
@@ -540,9 +755,10 @@ def review_dialogue_snippet(
     status: str,
     rating: int = 0,
     scene_tag: str | None = None,
+    genre_id: str | None = None,
     db_path: Path | str | None = None,
 ) -> dict[str, Any]:
-    """Approve or reject a candidate dialogue snippet (taste check) and sync card/FTS."""
+    """Approve or reject a candidate dialogue snippet (optionally reassigning its genre_id) and sync card/FTS."""
     if status not in SNIPPET_STATUSES:
         raise ValueError(f"无效的 status：{status}，必须是 {SNIPPET_STATUSES}")
 
@@ -555,18 +771,28 @@ def review_dialogue_snippet(
         if existing is None:
             raise ValueError(f"找不到对白片段：{snippet_id}")
 
+        old_genre_id = str(existing["genre_id"] or "default")
+        new_genre_id = (
+            genre_id.strip()
+            if (genre_id is not None and genre_id.strip())
+            else old_genre_id
+        )
         new_tag = existing["scene_tag"] if scene_tag is None else scene_tag.strip()
-        new_seg = _segment_text(f"{new_tag} {existing['raw_text']}") if scene_tag is not None else existing["seg_tokens"]
+        new_seg = (
+            _segment_text(f"{new_tag} {existing['raw_text']}")
+            if (scene_tag is not None or not existing["seg_tokens"])
+            else existing["seg_tokens"]
+        )
 
         conn.execute(
             """
             UPDATE dialogue_snippets
-            SET status = ?, rating = ?, scene_tag = ?, seg_tokens = ?
+            SET status = ?, rating = ?, scene_tag = ?, genre_id = ?, seg_tokens = ?
             WHERE id = ?
             """,
-            (status, int(rating), new_tag, new_seg, snippet_id),
+            (status, int(rating), new_tag, new_genre_id, new_seg, snippet_id),
         )
-        if scene_tag is not None:
+        if scene_tag is not None or new_genre_id != old_genre_id:
             conn.execute("DELETE FROM dialogue_fts WHERE snippet_id = ?", (snippet_id,))
             conn.execute(
                 """
@@ -583,6 +809,10 @@ def review_dialogue_snippet(
         ).fetchone()
         snippet = serialize_dialogue_snippet(row)
         assert snippet is not None
+        if old_genre_id != new_genre_id:
+            old_card = _card_file_path(old_genre_id, snippet_id, resolved)
+            if old_card.exists():
+                old_card.unlink()
         _sync_dialogue_card(snippet, resolved)
         return snippet
     finally:
@@ -824,7 +1054,7 @@ def get_dashboard_stats(db_path: Path | str | None = None) -> dict[str, Any]:
 
 
 def get_graph_universe(db_path: Path | str | None = None) -> dict[str, Any]:
-    """Return aggregated 3-channel knowledge graph payload (root, channels, tags, works)."""
+    """Return aggregated 3-channel knowledge graph payload (root, channels, tags, works, work_tag_links)."""
     conn, _ = _open_conn(db_path)
     try:
         def _count(sql: str, params: tuple[Any, ...] = ()) -> int:
@@ -833,6 +1063,7 @@ def get_graph_universe(db_path: Path | str | None = None) -> dict[str, Any]:
 
         raw_genres = _query_genres(conn)
         channel_buckets: dict[str, dict[str, Any]] = {}
+        channel_work_ids: dict[str, set[str]] = {}
         channels_list: list[dict[str, Any]] = []
         for ch in CHANNELS:
             bucket = {
@@ -848,8 +1079,10 @@ def get_graph_universe(db_path: Path | str | None = None) -> dict[str, Any]:
                 "highlights_count": 0,
             }
             channel_buckets[bucket["name"]] = bucket
+            channel_work_ids[bucket["name"]] = set()
             channels_list.append(bucket)
 
+        tag_channel_map: dict[str, str] = {}
         tags: list[dict[str, Any]] = []
         for g in raw_genres:
             ch_name = _normalize_channel(g.get("channel"))
@@ -860,8 +1093,11 @@ def get_graph_universe(db_path: Path | str | None = None) -> dict[str, Any]:
             characters_count = int(g.get("character_count") or 0)
             highlights_count = int(g.get("highlight_count") or 0)
 
+            tag_id_str = str(g["id"])
+            tag_channel_map[tag_id_str] = ch_name
+
             tag_item = {
-                "id": str(g["id"]),
+                "id": tag_id_str,
                 "name": str(g["name"]),
                 "channel": ch_name,
                 "channel_id": ch_id,
@@ -880,12 +1116,12 @@ def get_graph_universe(db_path: Path | str | None = None) -> dict[str, Any]:
 
             target_bucket = channel_buckets.get(ch_name) or channel_buckets["通用"]
             target_bucket["tags_count"] += 1
-            target_bucket["works_count"] += works_count
             target_bucket["approved_count"] += approved_count
             target_bucket["pending_count"] += pending_count
             target_bucket["characters_count"] += characters_count
             target_bucket["highlights_count"] += highlights_count
 
+        tags_map = _query_all_work_tags_map(conn)
         work_rows = conn.execute(
             """
             SELECT
@@ -904,21 +1140,48 @@ def get_graph_universe(db_path: Path | str | None = None) -> dict[str, Any]:
             ORDER BY w.created_at DESC
             """
         ).fetchall()
-        works = [
-            {
-                "id": str(r["id"]),
-                "title": str(r["title"]),
-                "author": str(r["author"] or ""),
-                "genre_id": str(r["genre_id"] or ""),
-                "total_chapters": int(r["total_chapters"] or 0),
-                "clean_chapters": int(r["clean_chapters"] or 0),
-                "corrupted_chapters": int(r["corrupted_chapters"] or 0),
-                "total_chars": int(r["total_chars"] or 0),
-                "approved_count": int(r["approved_count"] or 0),
-                "pending_count": int(r["pending_count"] or 0),
-            }
-            for r in work_rows
-        ]
+
+        works: list[dict[str, Any]] = []
+        work_tag_links: list[dict[str, Any]] = []
+        for r in work_rows:
+            wid = str(r["id"])
+            primary_gid = str(r["genre_id"] or "")
+            w_tags = tags_map.get(wid) or _query_work_tags_conn(
+                conn, wid, fallback_genre_id=primary_gid
+            )
+            w_tag_ids = [t["id"] for t in w_tags]
+            for t in w_tags:
+                tid = str(t["id"])
+                work_tag_links.append(
+                    {
+                        "work_id": wid,
+                        "tag_id": tid,
+                        "is_primary": 1 if int(t.get("is_primary") or 0) else 0,
+                    }
+                )
+                ch_for_tag = tag_channel_map.get(tid) or _normalize_channel(t.get("channel"))
+                if ch_for_tag in channel_work_ids:
+                    channel_work_ids[ch_for_tag].add(wid)
+
+            works.append(
+                {
+                    "id": wid,
+                    "title": str(r["title"]),
+                    "author": str(r["author"] or ""),
+                    "genre_id": primary_gid,
+                    "tag_ids": w_tag_ids,
+                    "tags": w_tags,
+                    "total_chapters": int(r["total_chapters"] or 0),
+                    "clean_chapters": int(r["clean_chapters"] or 0),
+                    "corrupted_chapters": int(r["corrupted_chapters"] or 0),
+                    "total_chars": int(r["total_chars"] or 0),
+                    "approved_count": int(r["approved_count"] or 0),
+                    "pending_count": int(r["pending_count"] or 0),
+                }
+            )
+
+        for ch_name, w_set in channel_work_ids.items():
+            channel_buckets[ch_name]["works_count"] = len(w_set)
 
         root = {
             "id": "root",
@@ -945,6 +1208,7 @@ def get_graph_universe(db_path: Path | str | None = None) -> dict[str, Any]:
             "channels": channels_list,
             "tags": tags,
             "works": works,
+            "work_tag_links": work_tag_links,
         }
     finally:
         conn.close()

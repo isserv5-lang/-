@@ -31,6 +31,7 @@ from swkb.repository import (
     get_dashboard_stats,
     get_graph_universe,
     get_work_detail,
+    get_work_tags,
     list_characters,
     list_dialogue_snippets,
     list_genres,
@@ -38,6 +39,7 @@ from swkb.repository import (
     review_dialogue_snippet,
     save_dialogue_snippet,
     save_scene_highlight,
+    set_work_tags,
     upsert_character,
     upsert_genre,
 )
@@ -46,6 +48,7 @@ from swkb.web_api import app
 
 SAMPLE_TXT = Path(r"D:\1\软件\小说\云糯糯.txt")
 SAMPLE_FAKE_DOCX = Path(r"D:\1\软件\小说\兽世万人嫌？可我是死遁的白月光..docx")
+SAMPLE_XUANXUE_TXT = Path(r"D:\1\软件\小说\玄学小祖宗：叼奶瓶算命全家宠(毛团儿).txt")
 
 
 @pytest.fixture()
@@ -216,10 +219,10 @@ def test_1_drawers_create_and_list(isolated_kb: Path, tmp_path: Path) -> None:
 
 
 @pytest.mark.skipif(
-    not (SAMPLE_TXT.exists() and SAMPLE_FAKE_DOCX.exists()),
+    not SAMPLE_TXT.exists(),
     reason="本地测试小说样本不存在",
 )
-def test_2_import_real_novels_and_detect_fake_docx_corruption(isolated_kb: Path) -> None:
+def test_2_import_real_novels_and_detect_fake_docx_corruption(isolated_kb: Path, tmp_path: Path) -> None:
     """测试 2：只读导入真实样本（含伪 .docx）并准确识别第 18 章后的防盗坏章。"""
     res_txt = import_novel_file(SAMPLE_TXT, genre_id="mengwa")
     assert res_txt["already_exists"] is False
@@ -228,9 +231,31 @@ def test_2_import_real_novels_and_detect_fake_docx_corruption(isolated_kb: Path)
     assert res_txt["corrupted_chapters"] == 0
     assert 10 <= res_txt["pending_snippets_count"] <= 15
 
-    res_docx = import_novel_file(SAMPLE_FAKE_DOCX, genre_id="shoushi")
+    if SAMPLE_FAKE_DOCX.exists():
+        fake_docx_target = SAMPLE_FAKE_DOCX
+        min_chapters = 100
+    else:
+        fake_docx_target = tmp_path / "fake_shoushi_anti_piracy.docx"
+        ch_blocks: list[str] = []
+        for idx in range(1, 31):
+            if idx < 18:
+                ch_blocks.append(
+                    f"第{idx}章 部落风云\n"
+                    f"狼兽雄性站在山洞口盯着兽夫们，精神海起伏不定。\n"
+                    f"苏晚轻声笑道：“第{idx}次提醒你，再吵今晚自己睡雪地。”\n"
+                    f"狐兽挑眉接话：“听见没，雌性伴侣发话了，快让开别挡道。”\n"
+                )
+            else:
+                ch_blocks.append(
+                    f"第{idx}章 异常防盗测试\n"
+                    f"最新章节正在手打中，请稍后刷新查看完整内容，请支持正版。\n"
+                )
+        fake_docx_target.write_text("\n".join(ch_blocks), encoding="utf-8")
+        min_chapters = 25
+
+    res_docx = import_novel_file(fake_docx_target, genre_id="shoushi")
     assert res_docx["already_exists"] is False
-    assert res_docx["total_chapters"] > 100
+    assert res_docx["total_chapters"] > min_chapters
     assert res_docx["clean_chapters"] > 0
     assert res_docx["corrupted_chapters"] >= 10
     assert 10 <= res_docx["pending_snippets_count"] <= 15
@@ -743,3 +768,202 @@ def test_7_web_api_and_mcp_tools(isolated_kb: Path, tmp_path: Path) -> None:
     )
     assert exp_res["ok"] is True
     assert "MCP批量建图测试" in exp_res["markdown"]
+
+
+def test_8_multi_tag_workflow_taste_isolation_and_graph_links(
+    isolated_kb: Path,
+    tmp_path: Path,
+) -> None:
+    """测试 8：一书多标签自动识别、PUT /api/works/{id}/tags 增删、试菜跨标签防串味与 work_tag_links。"""
+    multi_novel_text = "\n".join(
+        [
+            "第1章 重生兽世绑定系统",
+            "上一世苏绵死得凄惨，重活一世睁眼竟穿到兽世部落，眼前弹出系统提示面板：宿主已绑定系统，任务完成即可开启商城。",
+            "高大冷峻的狼兽雄性站在石屋门口，精神海躁动狂化，另一位狐兽兽夫抱臂冷哼，修罗场醋意四溢。",
+            "狐兽盯着狼兽咬牙切齿：“你这个情敌少在她面前争宠，她昨晚先摸的是我的尾巴。”",
+            "狼兽压着兽纹冷笑：“上一世的账还没算，今天这雌性伴侣归谁还不一定。”",
+            "第2章 奶团算命破局",
+            "三岁半的小奶团抱着奶瓶爬上石桌，小奶音清脆得很：“太爷爷别慌，我掐指一算，这卦象有血光之灾，贴一张符纸就解啦！”",
+            "系统提示音叮地响起，面板刷新任务完成奖励，满屋雄性大佬全都看傻了眼。",
+            "小团子晃着小脚丫补充：“乖宝算命很准的，不信明天开直播间连麦算一卦嘛。”",
+        ]
+    )
+
+    with TestClient(app) as client:
+        # 1) Multipart upload with auto_detect_tags=true + explicit extra_genre_ids
+        up_resp = client.post(
+            "/api/upload-novel",
+            files={
+                "file": (
+                    "兽世重生系统小奶团.txt",
+                    multi_novel_text.encode("utf-8"),
+                    "text/plain",
+                )
+            },
+            data={
+                "genre_id": "shoushi",
+                "extra_genre_ids": "mengwa",
+                "auto_detect_tags": "true",
+            },
+        )
+        assert up_resp.status_code == 200
+        imp = up_resp.json()["result"]
+        work_id = imp["work_id"]
+        assert imp["genre_id"] == "shoushi"
+        assert imp["tag_ids"][0] == "shoushi"
+        assert "mengwa" in imp["tag_ids"]
+        assert len(imp["tag_ids"]) >= 3  # primary + manual extra + auto-detected (e.g. xitong/chongsheng)
+        assert set(imp["auto_detected_tags"]) & {"xitong", "chongsheng", "zhibo_suanming", "xiuluochang"}
+
+        # 2) PUT /api/works/{id}/tags to add & remove tags cleanly
+        put_add = client.put(
+            f"/api/works/{work_id}/tags",
+            json={
+                "primary_tag_id": "shoushi",
+                "extra_tag_ids": ["mengwa", "xiuluochang", "xitong"],
+            },
+        )
+        assert put_add.status_code == 200
+        add_data = put_add.json()
+        assert add_data["ok"] is True
+        assert add_data["primary_tag_id"] == "shoushi"
+        assert add_data["tag_ids"] == ["shoushi", "mengwa", "xiuluochang", "xitong"]
+        assert add_data["tags"][0]["is_primary"] == 1
+        assert all(t["is_primary"] == 0 for t in add_data["tags"][1:])
+
+        # Remove xitong via PUT /api/works/{id}/tags
+        put_remove = client.put(
+            f"/api/works/{work_id}/tags",
+            json={
+                "primary_tag_id": "shoushi",
+                "extra_tag_ids": ["mengwa", "xiuluochang"],
+            },
+        )
+        assert put_remove.status_code == 200
+        assert put_remove.json()["tag_ids"] == ["shoushi", "mengwa", "xiuluochang"]
+
+        # Verify GET /api/works/{id}/tags and tag filter query
+        tags_resp = client.get(f"/api/works/{work_id}/tags")
+        assert tags_resp.status_code == 200
+        assert tags_resp.json()["tag_ids"] == ["shoushi", "mengwa", "xiuluochang"]
+        by_secondary = client.get("/api/works?genre_id=xiuluochang")
+        assert by_secondary.status_code == 200
+        assert any(w["id"] == work_id for w in by_secondary.json()["items"])
+
+        # 3) Taste-check anti-cross-contamination: assign two dialogues from the same book to different tags
+        sn_mengwa = save_dialogue_snippet(
+            genre_id="shoushi",
+            raw_text="小奶团抱着奶瓶奶声奶气：“太爷爷别慌，我掐指一算贴张符纸就解啦！”",
+            work_id=work_id,
+            chapter_num=2,
+            line_start=2,
+            line_end=2,
+            scene_tag="奶团萌言",
+            status="pending",
+        )
+        sn_xiuluo = save_dialogue_snippet(
+            genre_id="shoushi",
+            raw_text="狐兽咬牙切齿：“你这个情敌少在她面前争宠，她昨晚先摸的是我的尾巴。”",
+            work_id=work_id,
+            chapter_num=1,
+            line_start=4,
+            line_end=4,
+            scene_tag="雄竞修罗场",
+            status="pending",
+        )
+
+        # Approve via both /api/dialogues/{id}/review and /api/snippets/{id}/review with distinct genre_id
+        rev_a = client.post(
+            f"/api/dialogues/{sn_mengwa['id']}/review",
+            json={"status": "approved", "rating": 5, "genre_id": "mengwa"},
+        )
+        assert rev_a.status_code == 200
+        assert rev_a.json()["item"]["genre_id"] == "mengwa"
+        assert rev_a.json()["item"]["status"] == "approved"
+
+        rev_b = client.post(
+            f"/api/snippets/{sn_xiuluo['id']}/review",
+            json={"status": "approved", "rating": 5, "genre_id": "xiuluochang"},
+        )
+        assert rev_b.status_code == 200
+        assert rev_b.json()["item"]["genre_id"] == "xiuluochang"
+        assert rev_b.json()["item"]["status"] == "approved"
+
+        # Verify strict drawer isolation (no cross-contamination between mengwa / xiuluochang / shoushi)
+        mengwa_hits = list_dialogue_snippets(genre_id="mengwa", status="approved")
+        xiuluo_hits = list_dialogue_snippets(genre_id="xiuluochang", status="approved")
+        shoushi_hits = list_dialogue_snippets(genre_id="shoushi", status="approved")
+        assert [x["id"] for x in mengwa_hits] == [sn_mengwa["id"]]
+        assert [x["id"] for x in xiuluo_hits] == [sn_xiuluo["id"]]
+        assert shoushi_hits == []
+
+        # Verify Markdown cards exist ONLY in each snippet's target tag directory
+        assert (get_data_dir() / "cards" / "mengwa" / f"dialogue_{sn_mengwa['id']}.md").exists()
+        assert not (get_data_dir() / "cards" / "shoushi" / f"dialogue_{sn_mengwa['id']}.md").exists()
+        assert (get_data_dir() / "cards" / "xiuluochang" / f"dialogue_{sn_xiuluo['id']}.md").exists()
+        assert not (get_data_dir() / "cards" / "shoushi" / f"dialogue_{sn_xiuluo['id']}.md").exists()
+
+        # 4) Verify /api/graph/universe returns work_tag_links + isolated approved_count vs shared works_count
+        u_resp = client.get("/api/graph/universe")
+        assert u_resp.status_code == 200
+        u_data = u_resp.json()
+        assert "work_tag_links" in u_data
+        expected_links = [
+            {"work_id": work_id, "tag_id": "shoushi", "is_primary": 1},
+            {"work_id": work_id, "tag_id": "mengwa", "is_primary": 0},
+            {"work_id": work_id, "tag_id": "xiuluochang", "is_primary": 0},
+        ]
+        assert u_data["work_tag_links"] == expected_links
+
+        w_node = next(w for w in u_data["works"] if w["id"] == work_id)
+        assert w_node["tag_ids"] == ["shoushi", "mengwa", "xiuluochang"]
+        assert len(w_node["tags"]) == 3
+        assert w_node["tags"][0]["id"] == "shoushi" and w_node["tags"][0]["is_primary"] == 1
+
+        tag_map = {t["id"]: t for t in u_data["tags"]}
+        assert tag_map["shoushi"]["works_count"] == 1
+        assert tag_map["shoushi"]["approved_count"] == 0
+        assert tag_map["mengwa"]["works_count"] == 1
+        assert tag_map["mengwa"]["approved_count"] == 1
+        assert tag_map["xiuluochang"]["works_count"] == 1
+        assert tag_map["xiuluochang"]["approved_count"] == 1
+
+    # 5) Verify MCP update_work_tags tool parity
+    mcp_tag_res = mcp_server.update_work_tags(
+        work_id=work_id,
+        primary_tag_id="mengwa",
+        extra_tag_ids="shoushi,xitong",
+    )
+    assert mcp_tag_res["ok"] is True
+    assert mcp_tag_res["tag_ids"] == ["mengwa", "shoushi", "xitong"]
+    assert [t["id"] for t in get_work_tags(work_id)] == ["mengwa", "shoushi", "xitong"]
+
+
+@pytest.mark.skipif(
+    not (SAMPLE_XUANXUE_TXT.exists() or SAMPLE_FAKE_DOCX.exists()),
+    reason="本地多标签真实小说样本（玄学小祖宗/兽世万人嫌）不存在",
+)
+def test_9_real_novel_multi_tag_auto_detect(isolated_kb: Path) -> None:
+    """测试 9：导入真实长篇样本（《玄学小祖宗》或《兽世万人嫌》），自动识别并挂载多个标签且图谱输出 work_tag_links。"""
+    if SAMPLE_XUANXUE_TXT.exists():
+        res = import_novel_file(SAMPLE_XUANXUE_TXT, genre_id="mengwa", auto_detect_tags=True)
+        expected_primary = "mengwa"
+        expected_secondary_pool = {"zhibo_suanming", "xuanyi", "haomen", "zhenjia_qianjin", "dushi_naodong"}
+    else:
+        res = import_novel_file(SAMPLE_FAKE_DOCX, genre_id="shoushi", auto_detect_tags=True)
+        expected_primary = "shoushi"
+        expected_secondary_pool = {"chuanshu_sidun", "zhuiqi", "xitong", "xiuluochang"}
+
+    assert res["already_exists"] is False
+    assert res["genre_id"] == expected_primary
+    assert res["tag_ids"][0] == expected_primary
+    assert len(res["tag_ids"]) >= 2
+    assert len(res["auto_detected_tags"]) >= 1
+    assert set(res["auto_detected_tags"]) & expected_secondary_pool
+
+    universe = get_graph_universe()
+    links = [lk for lk in universe["work_tag_links"] if lk["work_id"] == res["work_id"]]
+    assert len(links) == len(res["tag_ids"])
+    assert links[0] == {"work_id": res["work_id"], "tag_id": expected_primary, "is_primary": 1}
+    assert any(lk["is_primary"] == 0 for lk in links)
+

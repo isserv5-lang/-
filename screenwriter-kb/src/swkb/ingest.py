@@ -15,6 +15,7 @@ from charset_normalizer import from_bytes
 
 from swkb.config import resolve_data_subdir
 from swkb.db import get_conn, utc_now_iso
+from swkb.taxonomy import TAG_BY_ID
 
 CHAPTER_HEADING_RE = re.compile(
     r"^(?:"
@@ -57,6 +58,315 @@ FOREIGN_WORLD_CLUSTERS = {
 }
 
 QUOTE_CHARS = set("“”\"「」『』")
+
+MAX_WORK_TAGS = 6
+
+# High-precision keyword lexicon mapped strictly to swkb.taxonomy.OFFICIAL_TAGS IDs.
+# Each entry has ("strong" unmistakable markers, "normal" supporting markers).
+TAG_FEATURE_RULES: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
+    # --- 女频 ---
+    "gongdou": (
+        ("宫斗", "宅斗", "庶女", "嫡女", "姨娘", "贵妃", "后宅", "庶妹", "嫡姐", "掌家", "侯府", "世子"),
+        ("太后", "皇后", "主母", "休书", "宫宴", "赐婚", "嫔妃", "宗室", "王府", "管家权", "侧妃"),
+    ),
+    "xianyan_naodong": (
+        ("现言脑洞", "吃瓜系统", "恋综", "娱乐圈", "热搜第一", "顶流"),
+        ("热搜", "经纪人", "综艺", "粉丝", "影帝", "弹幕", "微博", "直播"),
+    ),
+    "guyan_naodong": (
+        ("流放", "逃荒", "灵泉空间", "随身空间", "抄家流放", "古言脑洞"),
+        ("抄家", "灵泉", "空间", "囤物资", "荒年", "古代", "县令", "朝堂"),
+    ),
+    "haomen": (
+        ("豪门", "财阀", "总裁", "联姻", "黑卡", "董事会"),
+        ("集团", "收购", "股份", "别墅", "管家", "助理", "千金", "少爷", "宴会"),
+    ),
+    "niandai_nv": (
+        ("七零", "八零", "知青", "供销社", "粮票", "工分", "生产队", "下乡"),
+        ("大队长", "极品亲戚", "分家", "彩礼", "摆摊", "国营饭店", "布票", "年代"),
+    ),
+    "shoushi": (
+        ("兽世", "兽夫", "兽人", "雄性", "雌性", "精神海", "兽纹", "兽形", "狂化"),
+        ("伴侣", "部落", "结侣", "兽族", "亚兽", "蛇兽", "狼兽", "狐兽", "虎兽", "雌尊"),
+    ),
+    "xuanhuan_yq": (
+        ("师尊", "仙尊", "魔尊", "灵根", "契约兽", "渡劫", "剑宗"),
+        ("宗门", "灵脉", "丹药", "秘境", "仙界", "魔界", "灵力", "飞升", "长老"),
+    ),
+    "mengwa": (
+        ("萌宝", "团宠", "奶团", "小奶团", "小团子", "幼崽", "奶声奶气", "小奶音", "崽崽", "乖宝"),
+        ("小家伙", "小丫头", "软糯", "糖葫芦", "太爷爷", "爹地", "妈咪", "舅舅", "抱抱", "奶凶", "小朋友"),
+    ),
+    "zhenjia_qianjin": (
+        ("真千金", "假千金", "抱错", "断亲", "亲子鉴定", "养女"),
+        ("亲生女儿", "认亲", "偏心", "逐出家门", "亲生父母", "亲哥"),
+    ),
+    "zhuiqi": (
+        ("追妻", "火葬场", "离婚协议", "白月光", "替身", "复婚"),
+        ("离婚", "后悔", "挽回", "冷落", "原谅", "跪求", "心死", "放手"),
+    ),
+    "chuanshu_sidun": (
+        ("穿书", "死遁", "假死", "恶毒女配", "万人嫌", "原著", "炮灰"),
+        ("剧本", "剧情", "情节", "男主", "女主", "书里", "下线", "白月光", "攻略", "结局"),
+    ),
+    "danvzhu": (
+        ("虐渣", "渣男", "绿茶", "白莲花", "和离", "休夫", "独美"),
+        ("打脸", "实锤", "反杀", "退婚", "搞事业", "清醒"),
+    ),
+    "duxinshu": (
+        ("读心", "读心术", "偷听心声", "心声", "吃瓜", "内心吐槽"),
+        ("腹诽", "心里暗骂", "心底", "瓜田", "听见", "心里话"),
+    ),
+    "xianhun_houai": (
+        ("先婚后爱", "协议结婚", "契约婚姻", "隐婚", "结婚证"),
+        ("领证", "民政局", "婚后", "同居", "夫妻", "联姻"),
+    ),
+    "shanhun_tijia": (
+        ("闪婚", "替嫁", "冲喜", "代嫁"),
+        ("领证", "民政局", "婚约", "嫁给", "残疾大佬"),
+    ),
+    "bingjiao_jiushu": (
+        ("病娇", "偏执", "疯批", "阴鸷", "囚禁", "黑化", "救赎"),
+        ("占有欲", "锁链", "猩红", "别想逃", "乖乖", "发疯"),
+    ),
+    # --- 男频 ---
+    "dushi_naodong": (
+        ("都市脑洞", "金手指", "觉醒异能", "外挂"),
+        ("觉醒", "异能", "都市", "直播间", "脑洞", "奇葩"),
+    ),
+    "dushi_gaowu": (
+        ("高武", "灵气复苏", "气血", "武考", "异兽", "凶兽", "武馆"),
+        ("武道", "宗师", "战神", "境界", "突破", "秘境", "淬体"),
+    ),
+    "lishi_naodong": (
+        ("科举", "屯田", "朝堂", "造纸", "火药", "大明", "大唐", "大秦"),
+        ("皇帝", "皇子", "丞相", "武将", "边关", "精盐", "玻璃", "朝廷"),
+    ),
+    "chuantong_xh": (
+        ("丹田", "经脉", "宗门大比", "斗气", "炼丹", "剑意", "废柴"),
+        ("灵力", "功法", "圣地", "退婚", "秘境", "境界", "长老"),
+    ),
+    "xuanhuan_nd": (
+        ("长生", "苟道", "人生模拟", "模拟器", "气运之子", "熟练度"),
+        ("签到", "面板", "加点", "老六", "反派", "词条"),
+    ),
+    "xuanyi": (
+        ("厉鬼", "鬼魂", "阴气", "阴差", "煞气", "捉鬼", "驱邪", "诡异", "诡事"),
+        ("棺材", "墓地", "怨气", "凶案", "尸检", "符箓", "道士", "阵法", "玄学", "民俗"),
+    ),
+    "moshi_tunhuo": (
+        ("末世", "丧尸", "囤货", "安全屋", "避难所", "晶核", "天灾"),
+        ("极寒", "极热", "物资", "异能", "空间", "变异", "基地"),
+    ),
+    "zhutian": (
+        ("诸天", "无限流", "主神", "轮回空间", "位面", "剧情世界"),
+        ("副本", "穿梭", "积分", "兑换", "任务世界", "穿越世界"),
+    ),
+    "zhanshen_zx": (
+        ("赘婿", "上门女婿", "战神令", "龙王", "殿主"),
+        ("战神", "丈母娘", "退婚", "护国", "跪下"),
+    ),
+    "shenhao": (
+        ("神豪", "消费返利", "舔狗金", "百亿", "亿万"),
+        ("返利", "刷卡", "黑卡", "豪车", "包场", "买下", "资产"),
+    ),
+    "guize_guaitan": (
+        ("规则怪谈", "诡异副本", "违反规则", "守则", "理智值"),
+        ("规则", "怪谈", "纸条", "污染", "必须遵守", "不要相信"),
+    ),
+    "xiangcun": (
+        ("村霸", "种田", "鱼塘", "山货", "承包", "乡亲"),
+        ("村长", "养殖", "药材", "果园", "村里", "灵泉"),
+    ),
+    "jianbao_shenyi": (
+        ("鉴宝", "黄金瞳", "捡漏", "神医", "银针", "针灸"),
+        ("古玩", "青花瓷", "赝品", "把脉", "药方", "悬壶"),
+    ),
+    "gaozhishang": (
+        ("刑侦", "嫌疑人", "老千", "案发现场", "审讯"),
+        ("推理", "布局", "赌场", "暗语", "破案", "凶手", "逻辑"),
+    ),
+    "niandai_nan": (
+        ("倒货", "倒爷", "国营厂", "录像厅", "万元户", "下海"),
+        ("厂长", "批发", "磁带", "供销社", "改革开放"),
+    ),
+    # --- 通用 ---
+    "xitong": (
+        ("系统", "宿主", "任务完成", "系统提示", "绑定系统", "好感度", "面板"),
+        ("叮", "积分", "奖励", "签到", "商城", "提示音", "绑定", "进度条", "任务"),
+    ),
+    "chongsheng": (
+        ("重生", "上一世", "上辈子", "前世", "这一世", "重活一世"),
+        ("血仇", "复仇", "重来", "改变命运", "前生", "今生"),
+    ),
+    "jixian_fanzhuan": (
+        ("反转", "揭穿", "亲子鉴定", "亮出证据", "录音笔"),
+        ("监控", "录音", "证据", "真相", "打脸", "傻眼", "实锤"),
+    ),
+    "siwang_huidang": (
+        ("回档", "存档", "读档", "重置时间", "时间循环"),
+        ("循环", "重置", "时间线", "重开", "第几次"),
+    ),
+    "qunxiang_zuipao": (
+        ("互怼", "群像", "拌嘴", "贫嘴", "损友"),
+        ("吐槽", "憋笑", "哄堂大笑", "起哄", "接话"),
+    ),
+    "majia": (
+        ("马甲", "掉马", "隐藏身份", "幕后老板", "身份曝光"),
+        ("大佬", "传人", "竟然是", "居然是", "黑客", "神医"),
+    ),
+    "banzhu": (
+        ("扮猪吃虎", "深藏不露", "隐藏实力", "土包子", "乡巴佬"),
+        ("废物", "嘲讽", "轻视", "碾压", "狗眼看人低"),
+    ),
+    "zhibo_suanming": (
+        ("算命", "卜卦", "卦象", "玄学", "连麦", "天师", "血光之灾", "掐指一算", "批命", "符纸", "道观"),
+        ("风水", "符箓", "面相", "观相", "弹幕", "直播间", "大师", "祖师", "煞气", "铜钱", "罗盘", "算一卦"),
+    ),
+    "fafeng": (
+        ("发疯文学", "掀桌", "创死", "道德绑架", "精神状态"),
+        ("发疯", "素质", "忍无可忍", "奇葩"),
+    ),
+    "xiuluochang": (
+        ("修罗场", "雄竞", "情敌", "争风吃醋", "醋意"),
+        ("吃醋", "争夺", "偏爱", "占有欲", "咬牙切齿", "争宠", "冷哼", "盯着她"),
+    ),
+    "wucp": (
+        ("无CP", "搞事业", "事业脑", "不谈恋爱"),
+        ("搞钱", "专心修炼", "升级"),
+    ),
+    "shuangqiang": (
+        ("双强", "势均力敌", "棋逢对手"),
+        ("联手", "合作", "试探", "默契", "暗中配合"),
+    ),
+}
+
+
+def _parse_extra_tag_ids(raw: list[str] | tuple[str, ...] | str | None) -> list[str]:
+    """Normalize optional extra_genre_ids from list/tuple/comma-separated string."""
+    if raw is None:
+        return []
+    parts: list[str]
+    if isinstance(raw, str):
+        parts = re.split(r"[,，;；\s]+", raw.strip())
+    else:
+        parts = [str(item) for item in raw]
+    result: list[str] = []
+    seen: set[str] = set()
+    for part in parts:
+        tid = part.strip()
+        if tid and tid not in seen:
+            seen.add(tid)
+            result.append(tid)
+    return result
+
+
+def detect_secondary_tags(
+    text: str,
+    title: str,
+    primary_genre_id: str,
+    existing_extra_ids: list[str] | None = None,
+    max_auto: int = 3,
+) -> list[str]:
+    """Detect 1~3 high-confidence secondary official tags from book title and clean body text."""
+    if max_auto <= 0:
+        return []
+    excluded = {primary_genre_id.strip()} | set(existing_extra_ids or [])
+    sample_text = (text or "")[:120_000]
+    clean_title = (title or "").strip()
+
+    scored: list[tuple[float, str]] = []
+    for tag_id, (strong_words, normal_words) in TAG_FEATURE_RULES.items():
+        if tag_id in excluded or tag_id not in TAG_BY_ID:
+            continue
+
+        title_strong = sum(1 for w in strong_words if w in clean_title)
+        title_normal = sum(1 for w in normal_words if w in clean_title)
+
+        body_strong_distinct = 0
+        body_strong_hits = 0
+        body_normal_distinct = 0
+        body_normal_hits = 0
+
+        for w in strong_words:
+            c = sample_text.count(w)
+            if c > 0:
+                body_strong_distinct += 1
+                body_strong_hits += min(c, 12)
+
+        for w in normal_words:
+            c = sample_text.count(w)
+            if c > 0:
+                body_normal_distinct += 1
+                body_normal_hits += min(c, 8)
+
+        distinct_total = body_strong_distinct + body_normal_distinct
+        total_hits = body_strong_hits + body_normal_hits
+
+        is_confident = (
+            title_strong >= 1
+            or (title_normal >= 2)
+            or (body_strong_distinct >= 2 and body_strong_hits >= 3)
+            or (body_strong_distinct >= 1 and distinct_total >= 2 and total_hits >= 5)
+            or (distinct_total >= 3 and total_hits >= 8)
+        )
+        if not is_confident:
+            continue
+
+        score = (
+            title_strong * 12.0
+            + title_normal * 4.0
+            + body_strong_distinct * 3.5
+            + body_strong_hits * 1.5
+            + body_normal_distinct * 1.2
+            + body_normal_hits * 0.5
+        )
+        scored.append((score, tag_id))
+
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    return [tag_id for _, tag_id in scored[:max_auto]]
+
+
+def _score_text_for_tag(text: str, tag_id: str) -> float:
+    rules = TAG_FEATURE_RULES.get(tag_id)
+    if rules is None:
+        return 0.0
+    strong_words, normal_words = rules
+    score = 0.0
+    for w in strong_words:
+        c = text.count(w)
+        if c > 0:
+            score += min(c, 3) * 3.0
+    for w in normal_words:
+        c = text.count(w)
+        if c > 0:
+            score += min(c, 3) * 1.0
+    return score
+
+
+def _assign_snippet_genre(
+    raw_text: str,
+    trigger_context: str,
+    primary_genre_id: str,
+    work_tag_ids: list[str],
+) -> str:
+    """Route a candidate dialogue snippet to the best-fitting tag among the work's own tags."""
+    if len(work_tag_ids) <= 1:
+        return primary_genre_id
+
+    combined = f"{raw_text or ''}\n{trigger_context or ''}"
+    primary_score = _score_text_for_tag(combined, primary_genre_id)
+
+    best_tag = primary_genre_id
+    best_score = primary_score
+    for tid in work_tag_ids:
+        if tid == primary_genre_id:
+            continue
+        sec_score = _score_text_for_tag(combined, tid)
+        if sec_score >= 2.0 and sec_score > best_score:
+            best_score = sec_score
+            best_tag = tid
+    return best_tag
 
 
 def _decode_plain_bytes(raw_bytes: bytes) -> str:
@@ -448,42 +758,119 @@ def _extract_candidate_snippets(chapters: list[dict], target_count: int = 12) ->
     return selected
 
 
+def _fetch_work_tags_for_ingest(conn, work_id: str, fallback_primary: str) -> list[dict]:
+    rows = conn.execute(
+        """
+        SELECT wt.tag_id, wt.is_primary, g.name, g.channel, g.sub_group
+        FROM work_tags wt
+        LEFT JOIN genres g ON g.id = wt.tag_id
+        WHERE wt.work_id = ?
+        ORDER BY wt.is_primary DESC, wt.rowid ASC
+        """,
+        (work_id,),
+    ).fetchall()
+    tags = [
+        {
+            "id": str(r["tag_id"]),
+            "name": str(r["name"] or r["tag_id"]),
+            "channel": str(r["channel"] or "通用"),
+            "sub_group": str(r["sub_group"] or "题材主干"),
+            "is_primary": 1 if int(r["is_primary"] or 0) else 0,
+        }
+        for r in rows
+    ]
+    if not tags and fallback_primary:
+        g_row = conn.execute(
+            "SELECT name, channel, sub_group FROM genres WHERE id = ?",
+            (fallback_primary,),
+        ).fetchone()
+        tags = [
+            {
+                "id": fallback_primary,
+                "name": str(g_row["name"]) if g_row is not None else fallback_primary,
+                "channel": str(g_row["channel"] or "通用") if g_row is not None else "通用",
+                "sub_group": str(g_row["sub_group"] or "题材主干") if g_row is not None else "题材主干",
+                "is_primary": 1,
+            }
+        ]
+    return tags
+
+
 def import_novel_file(
     file_path: str | Path,
     genre_id: str = "mengwa",
     title: str | None = None,
     author: str = "",
+    extra_genre_ids: list[str] | None = None,
+    auto_detect_tags: bool = True,
     db_path: Path | None = None,
 ) -> dict:
-    """Import a .txt or .docx novel, detect corrupted anti-piracy chapters, and extract pending dialogues."""
+    """Import a .txt or .docx novel, detect corrupted anti-piracy chapters, auto-tag, and extract pending dialogues."""
     src_path = Path(file_path).expanduser()
     if not src_path.exists() or not src_path.is_file():
         raise FileNotFoundError(f"Novel file not found: {src_path}")
+
+    primary_genre = (genre_id or "mengwa").strip() or "mengwa"
+    manual_extras = [
+        tid for tid in _parse_extra_tag_ids(extra_genre_ids) if tid != primary_genre
+    ][: MAX_WORK_TAGS - 1]
 
     full_text, sha256 = load_novel_text(src_path)
     book_title = (title or "").strip() or src_path.stem
 
     conn = get_conn(db_path)
     try:
-        # Idempotent check on exact file hash + genre
+        # Idempotent check on exact file hash + primary genre
         existing = conn.execute(
             "SELECT * FROM works WHERE file_sha256 = ? AND genre_id = ?",
-            (sha256, genre_id),
+            (sha256, primary_genre),
         ).fetchone()
         if existing is not None and existing["norm_path"] and Path(existing["norm_path"]).exists():
+            now = utc_now_iso()
+            existing_id = str(existing["id"])
+            conn.execute(
+                """
+                INSERT INTO work_tags (work_id, tag_id, is_primary, created_at)
+                VALUES (?, ?, 1, ?)
+                ON CONFLICT(work_id, tag_id) DO UPDATE SET is_primary = 1
+                """,
+                (existing_id, primary_genre, now),
+            )
+            if manual_extras:
+                cur_count = conn.execute(
+                    "SELECT COUNT(*) FROM work_tags WHERE work_id = ?",
+                    (existing_id,),
+                ).fetchone()[0]
+                for tid in manual_extras:
+                    if cur_count >= MAX_WORK_TAGS:
+                        break
+                    cur = conn.execute(
+                        """
+                        INSERT OR IGNORE INTO work_tags (work_id, tag_id, is_primary, created_at)
+                        VALUES (?, ?, 0, ?)
+                        """,
+                        (existing_id, tid, now),
+                    )
+                    if cur.rowcount > 0:
+                        cur_count += 1
+            conn.commit()
+            existing_tags = _fetch_work_tags_for_ingest(conn, existing_id, primary_genre)
             corrupted_rows = conn.execute(
                 "SELECT chapter_num, title, corruption_reason FROM chapters WHERE work_id = ? AND is_corrupted = 1 ORDER BY chapter_num",
-                (existing["id"],),
+                (existing_id,),
             ).fetchall()
             pending_count = conn.execute(
                 "SELECT COUNT(*) FROM dialogue_snippets WHERE work_id = ? AND status = 'pending'",
-                (existing["id"],),
+                (existing_id,),
             ).fetchone()[0]
             return {
-                "work_id": existing["id"],
+                "work_id": existing_id,
                 "title": existing["title"],
                 "author": existing["author"],
                 "genre_id": existing["genre_id"],
+                "tag_ids": [t["id"] for t in existing_tags],
+                "tags": existing_tags,
+                "auto_detected_tags": [],
                 "norm_path": existing["norm_path"],
                 "file_sha256": existing["file_sha256"],
                 "total_chars": existing["total_chars"],
@@ -535,6 +922,28 @@ def import_novel_file(
             else:
                 clean_count += 1
 
+        # Auto-detect 1~3 high-confidence secondary tags strictly from clean chapters + title
+        clean_body_text = "\n".join(
+            ch["text"] for ch in raw_chapters if not ch["is_corrupted"]
+        )
+        auto_detected: list[str] = []
+        if auto_detect_tags:
+            remaining_slots = max(0, (MAX_WORK_TAGS - 1) - len(manual_extras))
+            auto_limit = min(3, remaining_slots)
+            if auto_limit > 0:
+                auto_detected = detect_secondary_tags(
+                    text=clean_body_text,
+                    title=book_title,
+                    primary_genre_id=primary_genre,
+                    existing_extra_ids=manual_extras,
+                    max_auto=auto_limit,
+                )
+
+        all_extras = (
+            manual_extras + [tid for tid in auto_detected if tid not in manual_extras]
+        )[: MAX_WORK_TAGS - 1]
+        work_tag_ids = [primary_genre, *all_extras]
+
         now = utc_now_iso()
         total_chars = len(re.sub(r"\s+", "", full_text))
         conn.execute(
@@ -549,7 +958,7 @@ def import_novel_file(
                 work_id,
                 book_title,
                 author.strip(),
-                genre_id,
+                primary_genre,
                 str(src_path),
                 str(norm_path),
                 sha256,
@@ -560,6 +969,23 @@ def import_novel_file(
                 now,
             ),
         )
+
+        # Persist primary and secondary tags into work_tags
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO work_tags (work_id, tag_id, is_primary, created_at)
+            VALUES (?, ?, 1, ?)
+            """,
+            (work_id, primary_genre, now),
+        )
+        for tid in all_extras:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO work_tags (work_id, tag_id, is_primary, created_at)
+                VALUES (?, ?, 0, ?)
+                """,
+                (work_id, tid, now),
+            )
 
         for ch in raw_chapters:
             conn.execute(
@@ -587,6 +1013,12 @@ def import_novel_file(
         saved_snippets: list[dict] = []
         for sn in snippets:
             sid = f"sn_{uuid.uuid4().hex[:10]}"
+            sn_genre_id = _assign_snippet_genre(
+                raw_text=sn["raw_text"],
+                trigger_context=sn["trigger_context"],
+                primary_genre_id=primary_genre,
+                work_tag_ids=work_tag_ids,
+            )
             seg_tokens = _tokenize_chinese(sn["raw_text"])
             conn.execute(
                 """
@@ -598,7 +1030,7 @@ def import_novel_file(
                 (
                     sid,
                     work_id,
-                    genre_id,
+                    sn_genre_id,
                     sn["chapter_num"],
                     sn["line_start"],
                     sn["line_end"],
@@ -620,6 +1052,7 @@ def import_novel_file(
             saved_snippets.append(
                 {
                     "id": sid,
+                    "genre_id": sn_genre_id,
                     "chapter_num": sn["chapter_num"],
                     "line_start": sn["line_start"],
                     "line_end": sn["line_end"],
@@ -629,11 +1062,15 @@ def import_novel_file(
             )
 
         conn.commit()
+        work_tags = _fetch_work_tags_for_ingest(conn, work_id, primary_genre)
         return {
             "work_id": work_id,
             "title": book_title,
             "author": author.strip(),
-            "genre_id": genre_id,
+            "genre_id": primary_genre,
+            "tag_ids": [t["id"] for t in work_tags],
+            "tags": work_tags,
+            "auto_detected_tags": auto_detected,
             "norm_path": str(norm_path),
             "file_sha256": sha256,
             "total_chars": total_chars,

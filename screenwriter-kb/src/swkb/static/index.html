@@ -109,17 +109,27 @@
   <!-- 隐藏本地文件选择框 -->
   <input id="novel-file-input" type="file" accept=".txt,.docx" hidden />
 
-  <!-- 喂小说快捷目标标签选择浮层（仅当从顶部按钮选文件且当前未选中标签，或拖到空白处时弹出） -->
-  <div id="upload-tag-popover" class="floating-popover hidden" role="dialog" aria-label="选择喂入哪个标签">
+  <!-- 喂小说快捷目标标签选择浮层（支持主标签 + 0~4个副标签 + AI自动识别开关） -->
+  <div id="upload-tag-popover" class="floating-popover hidden" role="dialog" aria-label="选择喂入标签与副标签">
     <div class="popover-header">
       <div>
-        <div class="popover-title">喂入哪个标签抽屉？</div>
+        <div class="popover-title">喂入标签抽屉（支持一书多签）</div>
         <div id="upload-file-name" class="popover-sub"></div>
       </div>
       <button id="upload-popover-close" class="icon-btn" type="button">×</button>
     </div>
+    <div class="upload-selected-bar">
+      <div id="upload-selected-chips" class="upload-selected-chips"></div>
+      <div class="upload-options-row">
+        <label class="ai-toggle-pill" title="导入时自动识别全书高频特征词并补充 1~3 个副标签">
+          <input id="upload-auto-detect" type="checkbox" checked />
+          <span>✦ AI 自动识别副标签</span>
+        </label>
+        <button id="upload-confirm-btn" class="pill-btn-primary" type="button" disabled>开始导入</button>
+      </div>
+    </div>
     <div class="popover-search-wrap">
-      <input id="upload-tag-filter" type="text" placeholder="快速过滤标签（如 萌宝 / 穿书 / 都市）..." autocomplete="off" />
+      <input id="upload-tag-filter" type="text" placeholder="快速过滤标签（点选主标签 + 0~4个副标签）..." autocomplete="off" />
     </div>
     <div id="upload-tag-list" class="upload-tag-grid"></div>
   </div>
@@ -190,11 +200,13 @@
     <span id="legend-text">
       <span class="leg-item"><span class="leg-arrow">→</span> 连线粗细 = 积累好梗量</span>
       <span class="leg-sep">·</span>
+      <span class="leg-item"><span class="leg-sec-arc"></span> 虚线弧 = 副标签跨连</span>
+      <span class="leg-sep">·</span>
       <span class="leg-item"><span class="leg-dashed"></span> 虚线胶囊 = 空抽屉/待补节点</span>
       <span class="leg-sep">·</span>
       <span class="leg-item"><span class="leg-halo"></span> 双环光晕 = 焦点节点</span>
       <span class="leg-sep">·</span>
-      <span class="leg-item">滚轮缩放 / 拖拽节点 / 双击居中 / 把小说文件直接拖到标签上即可喂书</span>
+      <span class="leg-item">滚轮缩放 / 拖拽节点 / 双击居中 / 拖文件到标签即可喂书</span>
     </span>
     <div class="zoom-controls">
       <button id="btn-fit-view" class="zoom-btn" type="button" title="居中对齐 (双击画布)">⌖</button>

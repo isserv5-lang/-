@@ -52,6 +52,16 @@ CREATE TABLE IF NOT EXISTS works (
     created_at TEXT
 );
 
+CREATE TABLE IF NOT EXISTS work_tags (
+    work_id TEXT NOT NULL,
+    tag_id TEXT NOT NULL,
+    is_primary INTEGER DEFAULT 0,
+    created_at TEXT,
+    PRIMARY KEY (work_id, tag_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_work_tags_tag_id ON work_tags(tag_id);
+
 CREATE TABLE IF NOT EXISTS chapters (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     work_id TEXT NOT NULL,
@@ -476,6 +486,37 @@ def _reassign_genre_references(conn: sqlite3.Connection, old_id: str, new_id: st
             f"UPDATE {table} SET genre_id = ? WHERE genre_id = ?",
             (new_id, old_id),
         )
+    wt_exists = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='work_tags'"
+    ).fetchone()
+    if wt_exists is not None:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO work_tags (work_id, tag_id, is_primary, created_at)
+            SELECT work_id, ?, is_primary, created_at FROM work_tags WHERE tag_id = ?
+            """,
+            (new_id, old_id),
+        )
+        conn.execute("DELETE FROM work_tags WHERE tag_id = ?", (old_id,))
+
+
+def _backfill_work_tags(conn: sqlite3.Connection, now: str) -> None:
+    """Idempotently backfill primary genre_id associations into work_tags for existing works."""
+    conn.execute(
+        """
+        INSERT INTO work_tags (work_id, tag_id, is_primary, created_at)
+        SELECT w.id, TRIM(w.genre_id), 1, COALESCE(NULLIF(w.created_at, ''), ?)
+        FROM works w
+        WHERE w.genre_id IS NOT NULL
+          AND TRIM(w.genre_id) != ''
+          AND NOT EXISTS (
+              SELECT 1 FROM work_tags wt
+              WHERE wt.work_id = w.id AND wt.is_primary = 1
+          )
+        ON CONFLICT(work_id, tag_id) DO UPDATE SET is_primary = 1
+        """,
+        (now,),
+    )
 
 
 def _seed_genres(conn: sqlite3.Connection, now: str) -> None:
@@ -720,6 +761,9 @@ def init_db(conn: sqlite3.Connection) -> None:
             "INSERT OR IGNORE INTO kb_meta (key, value) VALUES ('initial_seed_v1', ?)",
             (now,),
         )
+
+    # Ensure all existing works have their primary genre_id linked in work_tags.
+    _backfill_work_tags(conn, now)
     conn.commit()
 
 
@@ -735,7 +779,10 @@ def get_conn(db_path: Path | None = None) -> sqlite3.Connection:
     exists = conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name='genres'"
     ).fetchone()
-    if exists is None:
+    wt_exists = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='work_tags'"
+    ).fetchone()
+    if exists is None or wt_exists is None:
         init_db(conn)
     else:
         synced = None

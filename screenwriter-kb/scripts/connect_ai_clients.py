@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+CANONICAL_PROJECT_ROOT = Path(r"D:\Antigravity\zahuo-repo\screenwriter-kb")
 SRC_DIR = PROJECT_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
@@ -19,6 +20,19 @@ from swkb.db import get_conn, init_db  # noqa: E402
 
 SERVER_NAME = "screenwriter-kb"
 DEFAULT_DATA_DIR = Path(r"D:\ScreenwriterKB")
+
+
+def resolve_project_root() -> Path:
+    """Resolve the active D-drive project root and refuse legacy C-drive paths."""
+    resolved = PROJECT_ROOT.resolve()
+    norm_lower = resolved.as_posix().lower()
+    if norm_lower.startswith("c:/users/visser/downloads/zahuo"):
+        if CANONICAL_PROJECT_ROOT.exists():
+            return CANONICAL_PROJECT_ROOT.resolve()
+        raise RuntimeError(
+            f"禁止从旧 C 盘路径配置 MCP：{resolved}，请从 {CANONICAL_PROJECT_ROOT} 运行本脚本。"
+        )
+    return resolved
 
 
 def _configure_stdio() -> None:
@@ -74,13 +88,24 @@ def _toml_quote(value: str) -> str:
     return f'"{escaped}"'
 
 
+def _build_mcp_env(data_dir: Path) -> dict[str, str]:
+    resolved = data_dir.resolve()
+    return {
+        "SWKB_DATA_DIR": resolved.as_posix(),
+        "UV_CACHE_DIR": (resolved / ".uv-cache").as_posix(),
+        "TEMP": (resolved / ".tmp").as_posix(),
+    }
+
+
 def _render_codex_mcp_block(uv_exe: Path, project_root: Path, data_dir: Path) -> str:
     args_toml = ", ".join(_toml_quote(a) for a in _build_mcp_args(project_root))
+    env_map = _build_mcp_env(data_dir)
+    env_toml = ", ".join(f"{k} = {_toml_quote(v)}" for k, v in env_map.items())
     return (
         f"[mcp_servers.{SERVER_NAME}]\n"
         f"command = {_toml_quote(uv_exe.as_posix())}\n"
         f"args = [{args_toml}]\n"
-        f"env = {{ SWKB_DATA_DIR = {_toml_quote(data_dir.as_posix())} }}\n"
+        f"env = {{ {env_toml} }}\n"
     )
 
 
@@ -189,7 +214,7 @@ def update_json_mcp_config(
     mcp_servers[SERVER_NAME] = {
         "command": uv_exe.as_posix(),
         "args": _build_mcp_args(project_root),
-        "env": {"SWKB_DATA_DIR": data_dir.as_posix()},
+        "env": _build_mcp_env(data_dir),
     }
 
     serialized = json.dumps(data, ensure_ascii=False, indent=2) + "\n"
@@ -214,11 +239,18 @@ def update_json_mcp_config(
 def write_data_dir_launcher(data_dir: Path, uv_exe: Path, project_root: Path) -> Path:
     """Create D:\\ScreenwriterKB\\打开可视化知识库.cmd with CRLF and no UTF-8 BOM."""
     launcher = data_dir / "打开可视化知识库.cmd"
+    uv_cache_dir = data_dir / ".uv-cache"
+    tmp_dir = data_dir / ".tmp"
     lines = [
         "@echo off",
         "chcp 65001 >nul",
         "title 编剧本地知识库 & 互动影游工作台",
         f'set "SWKB_DATA_DIR={data_dir}"',
+        f'set "UV_CACHE_DIR={uv_cache_dir}"',
+        f'set "TEMP={tmp_dir}"',
+        f'set "TMP={tmp_dir}"',
+        'if not exist "%UV_CACHE_DIR%" mkdir "%UV_CACHE_DIR%"',
+        'if not exist "%TEMP%" mkdir "%TEMP%"',
         f'cd /d "{project_root}"',
         "echo 正在启动本地可视化知识库工作台 (http://127.0.0.1:8765) ...",
         "echo 浏览器将自动打开；关闭本窗口即可停止服务。",
@@ -265,6 +297,8 @@ def init_data_vault(data_dir: Path) -> Path:
     """Initialize the local data directory and SQLite schema with preset drawers & rules."""
     os.environ["SWKB_DATA_DIR"] = str(data_dir)
     resolved_dir = get_data_dir()
+    (resolved_dir / ".uv-cache").mkdir(parents=True, exist_ok=True)
+    (resolved_dir / ".tmp").mkdir(parents=True, exist_ok=True)
     db_path = get_db_path()
     conn = get_conn(db_path)
     try:
@@ -278,10 +312,11 @@ def main() -> int:
     _configure_stdio()
     os.environ.setdefault("SWKB_DATA_DIR", str(DEFAULT_DATA_DIR))
     data_dir = Path(os.environ["SWKB_DATA_DIR"])
+    project_root = resolve_project_root()
     uv_exe = find_uv_executable()
 
     resolved_dir = init_data_vault(data_dir)
-    launcher = write_data_dir_launcher(resolved_dir, uv_exe, PROJECT_ROOT)
+    launcher = write_data_dir_launcher(resolved_dir, uv_exe, project_root)
 
     codex_cfg = Path.home() / ".codex" / "config.toml"
     appdata = Path(os.environ.get("APPDATA", str(Path.home() / "AppData" / "Roaming")))
@@ -289,12 +324,13 @@ def main() -> int:
     agy_cfg = Path.home() / ".gemini" / "config" / "mcp_config.json"
 
     results = [
-        update_codex_config(codex_cfg, uv_exe, PROJECT_ROOT, resolved_dir),
-        update_json_mcp_config("claude-desktop", claude_cfg, uv_exe, PROJECT_ROOT, resolved_dir),
-        update_json_mcp_config("antigravity", agy_cfg, uv_exe, PROJECT_ROOT, resolved_dir),
+        update_codex_config(codex_cfg, uv_exe, project_root, resolved_dir),
+        update_json_mcp_config("claude-desktop", claude_cfg, uv_exe, project_root, resolved_dir),
+        update_json_mcp_config("antigravity", agy_cfg, uv_exe, project_root, resolved_dir),
     ]
-    synced_skills = sync_skill_to_globals(PROJECT_ROOT)
+    synced_skills = sync_skill_to_globals(project_root)
 
+    print(f"[OK] D 盘项目根目录：{project_root}")
     print(f"[OK] 数据保险箱已初始化：{resolved_dir}")
     print(f"[OK] 一键启动脚本已生成：{launcher}")
     for item in results:

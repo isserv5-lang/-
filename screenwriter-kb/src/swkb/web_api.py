@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import threading
 import uuid
@@ -40,6 +41,7 @@ from swkb.repository import (
     get_dashboard_stats,
     get_graph_universe,
     get_work_detail,
+    get_work_tags,
     list_characters,
     list_dialogue_snippets,
     list_genres,
@@ -48,6 +50,7 @@ from swkb.repository import (
     review_dialogue_snippet,
     save_dialogue_snippet,
     save_scene_highlight,
+    set_work_tags,
     update_work_summary,
     upsert_character,
     upsert_genre,
@@ -108,6 +111,13 @@ class NovelImportRequest(BaseModel):
     genre_id: str = "mengwa"
     title: str | None = None
     author: str = ""
+    extra_genre_ids: list[str] | str | None = None
+    auto_detect_tags: bool = True
+
+
+class WorkTagsUpdateRequest(BaseModel):
+    primary_tag_id: str
+    extra_tag_ids: list[str] | str | None = Field(default_factory=list)
 
 
 class WorkSummaryUpdateRequest(BaseModel):
@@ -132,6 +142,7 @@ class SnippetReviewRequest(BaseModel):
     status: str
     rating: int = 0
     scene_tag: str | None = None
+    genre_id: str | None = None
 
 
 class CharacterUpsertRequest(BaseModel):
@@ -234,6 +245,53 @@ def _slugify_genre_id(name: str) -> str:
     return f"drawer_{uuid.uuid4().hex[:8]}"
 
 
+def _parse_tag_id_list(raw: list[str] | str | None) -> list[str]:
+    if raw is None:
+        return []
+    parts: list[str]
+    if isinstance(raw, str):
+        stripped = raw.strip()
+        if not stripped:
+            return []
+        if stripped.startswith("["):
+            try:
+                loaded = json.loads(stripped)
+                if isinstance(loaded, list):
+                    parts = [str(item) for item in loaded]
+                else:
+                    parts = [stripped]
+            except (json.JSONDecodeError, ValueError):
+                parts = re.split(r"[,，;；\s]+", stripped)
+        else:
+            parts = re.split(r"[,，;；\s]+", stripped)
+    else:
+        parts = [str(item) for item in raw]
+
+    result: list[str] = []
+    seen: set[str] = set()
+    for part in parts:
+        tid = part.strip()
+        if tid and tid not in seen:
+            seen.add(tid)
+            result.append(tid)
+    return result
+
+
+def _parse_bool_flag(raw: bool | str | None, default: bool = True) -> bool:
+    if raw is None:
+        return default
+    if isinstance(raw, bool):
+        return raw
+    val = str(raw).strip().lower()
+    if not val:
+        return default
+    if val in {"0", "false", "no", "off", "n"}:
+        return False
+    if val in {"1", "true", "yes", "on", "y"}:
+        return True
+    return default
+
+
 # ---------------------------------------------------------------------------
 # Static & Health
 # ---------------------------------------------------------------------------
@@ -328,6 +386,8 @@ async def api_upload_novel(
     genre_id: str | None = Form(default=None),
     title: str | None = Form(default=None),
     author: str = Form(default=""),
+    extra_genre_ids: str | None = Form(default=None),
+    auto_detect_tags: str | None = Form(default=None),
 ):
     _ensure_db()
     raw_filename = Path(file.filename or "novel.txt").name
@@ -359,6 +419,18 @@ async def api_upload_novel(
     resolved_author = (
         (author or request.query_params.get("author") or "").strip()
     )
+    raw_extra = (
+        extra_genre_ids
+        if extra_genre_ids is not None
+        else request.query_params.get("extra_genre_ids")
+    )
+    resolved_extra = _parse_tag_id_list(raw_extra)
+    raw_auto = (
+        auto_detect_tags
+        if auto_detect_tags is not None
+        else request.query_params.get("auto_detect_tags")
+    )
+    resolved_auto = _parse_bool_flag(raw_auto, default=True)
 
     try:
         result = await run_in_threadpool(
@@ -367,6 +439,8 @@ async def api_upload_novel(
             genre_id=resolved_genre,
             title=resolved_title,
             author=resolved_author,
+            extra_genre_ids=resolved_extra or None,
+            auto_detect_tags=resolved_auto,
         )
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"上传导入失败：{exc}") from exc
@@ -387,12 +461,15 @@ def api_import_novel(payload: NovelImportRequest):
     target = Path(raw_path)
     if not target.exists() or not target.is_file():
         raise HTTPException(status_code=400, detail=f"找不到该文件：{raw_path}")
+    resolved_extra = _parse_tag_id_list(payload.extra_genre_ids)
     try:
         result = import_novel_file(
             file_path=target,
             genre_id=payload.genre_id.strip() or "mengwa",
             title=payload.title.strip() if payload.title else None,
             author=payload.author.strip(),
+            extra_genre_ids=resolved_extra or None,
+            auto_detect_tags=bool(payload.auto_detect_tags),
         )
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"导入失败：{exc}") from exc
@@ -406,6 +483,45 @@ def api_get_work_detail(work_id: str):
     if detail is None:
         raise HTTPException(status_code=404, detail="找不到这本书")
     return {"work": detail}
+
+
+@app.get("/api/works/{work_id}/tags")
+def api_get_work_tags(work_id: str):
+    _ensure_db()
+    detail = get_work_detail(work_id)
+    if detail is None:
+        raise HTTPException(status_code=404, detail="找不到这本书")
+    tags = get_work_tags(work_id)
+    return {
+        "work_id": work_id,
+        "primary_tag_id": tags[0]["id"] if tags else detail.get("genre_id", ""),
+        "tag_ids": [t["id"] for t in tags],
+        "tags": tags,
+    }
+
+
+@app.put("/api/works/{work_id}/tags")
+def api_update_work_tags(work_id: str, payload: WorkTagsUpdateRequest):
+    _ensure_db()
+    primary = (payload.primary_tag_id or "").strip()
+    if not primary:
+        raise HTTPException(status_code=400, detail="主标签 primary_tag_id 不能为空")
+    extras = _parse_tag_id_list(payload.extra_tag_ids)
+    try:
+        tags = set_work_tags(
+            work_id=work_id,
+            primary_tag_id=primary,
+            extra_tag_ids=extras,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {
+        "ok": True,
+        "work_id": work_id,
+        "primary_tag_id": tags[0]["id"] if tags else primary,
+        "tag_ids": [t["id"] for t in tags],
+        "tags": tags,
+    }
 
 
 @app.put("/api/works/{work_id}/summary")
@@ -461,16 +577,14 @@ def api_list_snippets(
     _ensure_db()
     gid = genre_id.strip() if genre_id else None
     wid = work_id.strip() if work_id else None
-    fetch_limit = max(limit, 120) if wid else limit
     items = list_dialogue_snippets(
         genre_id=gid or None,
         status=status,
         query=query.strip(),
         scene_tag=scene_tag.strip(),
-        limit=fetch_limit,
+        limit=limit,
+        work_id=wid or None,
     )
-    if wid:
-        items = [item for item in items if item.get("work_id") == wid][:limit]
     return {"items": items}
 
 
@@ -495,6 +609,7 @@ def api_save_snippet(payload: SnippetCreateRequest):
 
 
 @app.post("/api/snippets/{snippet_id}/review")
+@app.post("/api/dialogues/{snippet_id}/review")
 def api_review_snippet(snippet_id: str, payload: SnippetReviewRequest):
     _ensure_db()
     if payload.status not in ("pending", "approved", "rejected"):
@@ -505,6 +620,7 @@ def api_review_snippet(snippet_id: str, payload: SnippetReviewRequest):
             status=payload.status,
             rating=payload.rating,
             scene_tag=payload.scene_tag,
+            genre_id=payload.genre_id.strip() if payload.genre_id else None,
         )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
